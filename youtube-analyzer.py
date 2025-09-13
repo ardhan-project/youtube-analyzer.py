@@ -140,54 +140,37 @@ def filter_by_video_type(items, video_type_label: str):
         return [v for v in items if v.get("live", "none") == "live"]
     return items
 
-# ================== Judul Generator ==================
-def top_keywords_from_titles(titles, topk=8):
-    words=[]
-    for t in titles:
-        for w in re.split(r"[^\w]+",t.lower()):
-            if len(w)>=3 and w not in STOPWORDS and not w.isdigit():
-                words.append(w)
-    cnt=Counter(words)
-    return [w for w,_ in cnt.most_common(topk)]
+# ================== Judul Generator (Pure dari data riset) ==================
+def generate_titles_from_data(videos, sort_option):
+    if not videos: return []
 
-def derive_duration_phrase(videos):
-    secs=[v["duration_sec"] for v in videos if v.get("duration_sec",0)>0]
-    if not secs: return "3 Hours"
-    avg=sum(secs)/len(secs)
-    if avg>=2*3600: return "3 Hours"
-    if avg>=3600: return "2 Hours"
-    if avg>=1800: return "1 Hour"
-    return "30 Minutes"
+    # ambil top 5 sesuai urutan
+    if sort_option == "Paling Banyak Ditonton":
+        sorted_videos = sorted(videos, key=lambda x: x["views"], reverse=True)
+    elif sort_option == "Terbaru":
+        sorted_videos = sorted(videos, key=lambda x: x["publishedAt"], reverse=True)
+    elif sort_option == "VPH Tertinggi":
+        sorted_videos = sorted(videos, key=lambda x: x["vph"], reverse=True)
+    else:
+        sorted_videos = videos
 
-def ensure_len(s, min_len=66):
-    if len(s)>=min_len: return s
-    pad=" | Focus • Study • Relax • Deep Sleep"
-    return s+pad
+    top_titles = [v["title"] for v in sorted_videos[:5]]
 
-def generate_titles_structured(keyword_main,videos,titles_all):
-    kw=keyword_main.strip() or "Healing Flute Meditation"
-    topk=top_keywords_from_titles(titles_all,8)
-    k1=(topk[0] if topk else "Relaxation").title()
-    k2=(topk[1] if len(topk)>1 else "Sleep").title()
-    dur=derive_duration_phrase(videos)
+    rekomendasi = []
+    for i in range(len(top_titles)):
+        base = top_titles[i]
+        extra = top_titles[(i+1) % len(top_titles)]
+        combined = f"{base} | {extra}"
+        if len(combined) < 66:
+            combined += " | Koleksi Lengkap"
+        rekomendasi.append(combined)
 
-    titles=[]
-    # Pola 1
-    titles.append(f"Eliminate Stress & Anxiety | {kw.title()} for Deep {k1}")
-    titles.append(f"Heal Faster & Clear Mind | {kw.title()} Therapy for {k2}")
+    gabungan = " • ".join(top_titles[:3])
+    if len(gabungan) < 66:
+        gabungan += " | Terpopuler"
+    rekomendasi.append(gabungan)
 
-    # Pola 2
-    titles.append(f"{kw.title()} | Deep Calm and Healing Energy for {k1}")
-    titles.append(f"{kw.title()} | Stress Relief and Emotional Reset for {k2}")
-    titles.append(f"{kw.title()} | Gentle Sounds to Focus, Study and Inner Healing")
-
-    # Pola 3
-    titles.append(f"{dur} | {kw.title()} – Reduce Overthinking, Fall Asleep Fast")
-    titles.append(f"{dur} Non-Stop | {kw.title()} – Relax Mind, Boost Serotonin")
-    titles.append(f"10 Hours Loop | {kw.title()} – Deep Meditation and Emotional Balance")
-    titles.append(f"{dur} | {kw.title()} – Perfect for Yoga, Sleep and Stress Detox")
-
-    return [ensure_len(t) for t in titles[:10]]
+    return rekomendasi[:10]
 
 # ================== MAIN ==================
 if submit:
@@ -225,7 +208,7 @@ if submit:
 
         # Judul
         st.subheader("💡 Rekomendasi Judul (10 Judul)")
-        rec_titles=generate_titles_structured(keyword,videos_all,all_titles)
+        rec_titles=generate_titles_from_data(videos_all,sort_option)
         for idx,rt in enumerate(rec_titles,1):
             col1,col2=st.columns([8,1])
             with col1: st.text_input(f"Judul {idx}",rt,key=f"judul_{idx}")
