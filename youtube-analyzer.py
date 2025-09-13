@@ -140,11 +140,19 @@ def filter_by_video_type(items, video_type_label: str):
         return [v for v in items if v.get("live", "none") == "live"]
     return items
 
-# ================== Judul Generator (Pure dari data riset) ==================
-def generate_titles_from_data(videos, sort_option):
-    if not videos: return []
+# ================== Judul Generator (<=100 char) ==================
+def trim_to_100(text):
+    if len(text) <= 100:
+        return text
+    trimmed = text[:100]
+    if " " in trimmed:
+        trimmed = trimmed[:trimmed.rfind(" ")]
+    return trimmed
 
-    # ambil top 5 sesuai urutan
+def generate_titles_from_data(videos, sort_option):
+    if not videos: 
+        return []
+
     if sort_option == "Paling Banyak Ditonton":
         sorted_videos = sorted(videos, key=lambda x: x["views"], reverse=True)
     elif sort_option == "Terbaru":
@@ -163,14 +171,14 @@ def generate_titles_from_data(videos, sort_option):
         combined = f"{base} | {extra}"
         if len(combined) < 66:
             combined += " | Koleksi Lengkap"
-        rekomendasi.append(combined)
+        rekomendasi.append(trim_to_100(combined))
 
     gabungan = " • ".join(top_titles[:3])
     if len(gabungan) < 66:
         gabungan += " | Terpopuler"
-    rekomendasi.append(gabungan)
+    rekomendasi.append(trim_to_100(gabungan))
 
-    return rekomendasi[:10]
+    return [trim_to_100(t) for t in rekomendasi[:10]]
 
 # ================== MAIN ==================
 if submit:
@@ -207,12 +215,13 @@ if submit:
                 "Durasi":v.get("duration","-"),"Link":f"https://www.youtube.com/watch?v={v['id']}"})
 
         # Judul
-        st.subheader("💡 Rekomendasi Judul (10 Judul)")
+        st.subheader("💡 Rekomendasi Judul (10 Judul, <=100 Karakter)")
         rec_titles=generate_titles_from_data(videos_all,sort_option)
         for idx,rt in enumerate(rec_titles,1):
-            col1,col2=st.columns([8,1])
+            col1,col2,col3=st.columns([6,1,1])
             with col1: st.text_input(f"Judul {idx}",rt,key=f"judul_{idx}")
-            with col2: st.button("📋",key=f"copy_judul_{idx}",help="Salin judul",on_click=lambda t=rt: st.session_state.update({"copied":t}))
+            with col2: st.markdown(f"<span style='font-size:12px;color:gray'>{len(rt)}/100</span>",unsafe_allow_html=True)
+            with col3: st.button("📋",key=f"copy_judul_{idx}",help="Salin judul",on_click=lambda t=rt: st.session_state.update({"copied":t}))
 
         if "copied" in st.session_state:
             st.success(f"Judul tersalin: {st.session_state['copied']}")
