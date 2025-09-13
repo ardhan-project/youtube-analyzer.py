@@ -1,0 +1,9 @@
+streamlit
+pandas
+requests
+wordcloud
+matplotlib
+langdetect
+pytrends
+seaborn
+google-generativeai
