@@ -8,19 +8,6 @@ import re
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
 
-# ================== Region List ==================
-YOUTUBE_REGIONS = {
-    "Worldwide (US Default)":"US","Argentina":"AR","Australia":"AU","Austria":"AT","Bahrain":"BH","Bangladesh":"BD","Belgium":"BE","Bolivia":"BO",
-    "Brazil":"BR","Bulgaria":"BG","Canada":"CA","Chile":"CL","Colombia":"CO","Costa Rica":"CR","Croatia":"HR","Cyprus":"CY","Czech Republic":"CZ",
-    "Denmark":"DK","Dominican Republic":"DO","Ecuador":"EC","Egypt":"EG","Finland":"FI","France":"FR","Germany":"DE","Greece":"GR","Guatemala":"GT",
-    "Hong Kong":"HK","Hungary":"HU","India":"IN","Indonesia":"ID","Ireland":"IE","Israel":"IL","Italy":"IT","Japan":"JP","Kenya":"KE","Kuwait":"KW",
-    "Latvia":"LV","Lebanon":"LB","Lithuania":"LT","Luxembourg":"LU","Malaysia":"MY","Mexico":"MX","Morocco":"MA","Nepal":"NP","Netherlands":"NL",
-    "New Zealand":"NZ","Nigeria":"NG","Norway":"NO","Pakistan":"PK","Peru":"PE","Philippines":"PH","Poland":"PL","Portugal":"PT","Qatar":"QA",
-    "Romania":"RO","Russia":"RU","Saudi Arabia":"SA","Singapore":"SG","Slovakia":"SK","Slovenia":"SI","South Africa":"ZA","South Korea":"KR",
-    "Spain":"ES","Sri Lanka":"LK","Sweden":"SE","Switzerland":"CH","Taiwan":"TW","Thailand":"TH","Turkey":"TR","Ukraine":"UA","UAE":"AE",
-    "United Kingdom":"GB","United States":"US","Vietnam":"VN","Zimbabwe":"ZW"
-}
-
 STOPWORDS = set("""
 a an and the for of to in on with from by at as or & | - live official lyrics lyric audio video music mix hour hours relax relaxing study sleep deep best new latest 4k 8k
 """.split())
@@ -36,8 +23,6 @@ with st.sidebar:
     st.header("⚙️ Pengaturan")
     api_key = st.text_input("YouTube Data API Key", st.session_state.api_key, type="password")
     max_per_order = st.slider("Jumlah video per kategori", 5, 30, 15, 1)
-    region_name = st.selectbox("Pilih Negara", list(YOUTUBE_REGIONS.keys()))
-    region = YOUTUBE_REGIONS[region_name]
     if st.button("Simpan"):
         st.session_state.api_key = api_key
         st.success("API Key berhasil disimpan!")
@@ -50,7 +35,6 @@ if not st.session_state.api_key:
 with st.form("youtube_form"):
     keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation")
     sort_option = st.selectbox("Urutkan:", ["Paling Relevan","Paling Banyak Ditonton","Terbaru","VPH Tertinggi"])
-    video_type = st.radio("Tipe Video", ["Semua","Regular","Short","Live"])
     submit = st.form_submit_button("🔍 Cari Video")
 
 # ================== Utils ==================
@@ -92,11 +76,8 @@ def format_jam_utc(publishedAt):
     except: return "-"
 
 # ================== API ==================
-def yt_search_ids(api_key, query, order, max_results, video_type="all"):
+def yt_search_ids(api_key, query, order, max_results):
     params={"part":"snippet","q":query,"type":"video","order":order,"maxResults":max_results,"key":api_key}
-    if video_type=="short": params["videoDuration"]="short"
-    elif video_type=="regular": params["videoDuration"]="medium"
-    elif video_type=="live": params["eventType"]="live"
     r=requests.get(SEARCH_URL,params=params).json()
     return [it["id"]["videoId"] for it in r.get("items",[]) if it.get("id",{}).get("videoId")]
 
@@ -124,19 +105,19 @@ def yt_videos_detail(api_key, ids:list):
         out.append(rec)
     return out
 
-def get_trending(api_key, region="US", max_results=15):
-    params={"part":"snippet,statistics,contentDetails","chart":"mostPopular","regionCode":region,"maxResults":max_results,"key":api_key}
+def get_trending(api_key, max_results=15):
+    params={"part":"snippet,statistics,contentDetails","chart":"mostPopular","regionCode":"US","maxResults":max_results,"key":api_key}
     r=requests.get(VIDEOS_URL,params=params).json()
     return yt_videos_detail(api_key,[it["id"] for it in r.get("items",[])])
 
-# ================== Sort & Filter Helpers ==================
+# ================== Sort ==================
 def map_sort_option(sort_option: str):
     if sort_option == "Paling Banyak Ditonton":
         return "viewCount"
     elif sort_option == "Terbaru":
         return "date"
     elif sort_option == "VPH Tertinggi":
-        return "date"  # ambil by date, sort manual di client
+        return "date"
     else:
         return "relevance"
 
@@ -147,15 +128,6 @@ def apply_client_sort(items, sort_option: str):
         return sorted(items, key=lambda x: x.get("publishedAt", ""), reverse=True)
     if sort_option == "VPH Tertinggi":
         return sorted(items, key=lambda x: x.get("vph", 0.0), reverse=True)
-    return items
-
-def filter_by_video_type(items, video_type_label: str):
-    if video_type_label == "Short":
-        return [v for v in items if v.get("duration_sec", 0) <= 60]
-    if video_type_label == "Regular":
-        return [v for v in items if v.get("duration_sec", 0) > 60]
-    if video_type_label == "Live":
-        return [v for v in items if v.get("live", "none") == "live"]
     return items
 
 # ================== Judul Generator ==================
@@ -204,23 +176,19 @@ def generate_titles_structured(keyword_main,videos,titles_all):
 # ================== MAIN ==================
 if submit:
     if not keyword.strip():
-        st.info(f"📈 Menampilkan trending di {region_name}")
-        videos_all=get_trending(st.session_state.api_key,region=region,max_results=max_per_order)
+        st.info("📈 Menampilkan trending (default US)")
+        videos_all=get_trending(st.session_state.api_key,max_per_order)
     else:
         st.info(f"🔎 Riset keyword: {keyword}")
-        vtype_map={"Semua":"all","Regular":"regular","Short":"short","Live":"live"}
         order=map_sort_option(sort_option)
-        ids=yt_search_ids(st.session_state.api_key,keyword,order,max_per_order,vtype_map[video_type])
+        ids=yt_search_ids(st.session_state.api_key,keyword,order,max_per_order)
         videos_all=yt_videos_detail(st.session_state.api_key,ids)
 
-    # Terapkan filter tipe video & sort manual di client
-    videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
 
     if not videos_all:
         st.error("❌ Tidak ada video ditemukan")
     else:
-        # tampilkan video
         cols=st.columns(3)
         all_titles=[]; rows_for_csv=[]
         for i,v in enumerate(videos_all):
