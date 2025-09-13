@@ -1,20 +1,43 @@
 import streamlit as st
 import requests
+import pandas as pd
 from datetime import datetime, timezone
+from collections import Counter
+import re
 
-# === Konfigurasi Awal ===
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
-
 st.title("🎬 YouTube Trending Explorer")
-st.write("Temukan video trending dan populer dari seluruh dunia")
 
-# === Input API Key ===
+# ================== Region List ==================
+YOUTUBE_REGIONS = {
+    "Worldwide (US Default)":"US","Argentina":"AR","Australia":"AU","Austria":"AT","Bahrain":"BH","Bangladesh":"BD","Belgium":"BE","Bolivia":"BO",
+    "Brazil":"BR","Bulgaria":"BG","Canada":"CA","Chile":"CL","Colombia":"CO","Costa Rica":"CR","Croatia":"HR","Cyprus":"CY","Czech Republic":"CZ",
+    "Denmark":"DK","Dominican Republic":"DO","Ecuador":"EC","Egypt":"EG","Finland":"FI","France":"FR","Germany":"DE","Greece":"GR","Guatemala":"GT",
+    "Hong Kong":"HK","Hungary":"HU","India":"IN","Indonesia":"ID","Ireland":"IE","Israel":"IL","Italy":"IT","Japan":"JP","Kenya":"KE","Kuwait":"KW",
+    "Latvia":"LV","Lebanon":"LB","Lithuania":"LT","Luxembourg":"LU","Malaysia":"MY","Mexico":"MX","Morocco":"MA","Nepal":"NP","Netherlands":"NL",
+    "New Zealand":"NZ","Nigeria":"NG","Norway":"NO","Pakistan":"PK","Peru":"PE","Philippines":"PH","Poland":"PL","Portugal":"PT","Qatar":"QA",
+    "Romania":"RO","Russia":"RU","Saudi Arabia":"SA","Singapore":"SG","Slovakia":"SK","Slovenia":"SI","South Africa":"ZA","South Korea":"KR",
+    "Spain":"ES","Sri Lanka":"LK","Sweden":"SE","Switzerland":"CH","Taiwan":"TW","Thailand":"TH","Turkey":"TR","Ukraine":"UA","UAE":"AE",
+    "United Kingdom":"GB","United States":"US","Vietnam":"VN","Zimbabwe":"ZW"
+}
+
+STOPWORDS = set("""
+a an and the for of to in on with from by at as or & | - live official lyrics lyric audio video music mix hour hours relax relaxing study sleep deep best new latest 4k 8k
+""".split())
+
+SEARCH_URL="https://www.googleapis.com/youtube/v3/search"
+VIDEOS_URL="https://www.googleapis.com/youtube/v3/videos"
+
+# ================== Sidebar ==================
 if "api_key" not in st.session_state:
     st.session_state.api_key = ""
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     api_key = st.text_input("YouTube Data API Key", st.session_state.api_key, type="password")
+    max_per_order = st.slider("Jumlah video per kategori", 5, 30, 15, 1)
+    region_name = st.selectbox("Pilih Negara", list(YOUTUBE_REGIONS.keys()))
+    region = YOUTUBE_REGIONS[region_name]
     if st.button("Simpan"):
         st.session_state.api_key = api_key
         st.success("API Key berhasil disimpan!")
@@ -23,143 +46,227 @@ if not st.session_state.api_key:
     st.warning("⚠️ Masukkan API Key di sidebar untuk mulai")
     st.stop()
 
-# === Form Input ===
+# ================== Form Input ==================
 with st.form("youtube_form"):
-    keyword = st.text_input("Kata Kunci", placeholder="healing flute meditation")
-    sort_option = st.selectbox("Urutkan:", ["Paling Relevan", "Paling Banyak Ditonton", "Terbaru", "VPH Tertinggi"])
+    keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation")
+    sort_option = st.selectbox("Urutkan:", ["Paling Relevan","Paling Banyak Ditonton","Terbaru","VPH Tertinggi"])
+    video_type = st.radio("Tipe Video", ["Semua","Regular","Short","Live"])
     submit = st.form_submit_button("🔍 Cari Video")
 
-# === Fungsi Utility ===
+# ================== Utils ==================
+def iso8601_to_seconds(duration: str) -> int:
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration or "")
+    if not m: return 0
+    h, mi, s = int(m.group(1) or 0), int(m.group(2) or 0), int(m.group(3) or 0)
+    return h*3600+mi*60+s
+
+def fmt_duration(sec: int) -> str:
+    if sec<=0: return "-"
+    h, m, s = sec//3600, (sec%3600)//60, sec%60
+    return f"{h}:{m:02d}:{s:02d}" if h>0 else f"{m}:{s:02d}"
+
 def hitung_vph(views, publishedAt):
-    published_time = datetime.strptime(publishedAt, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    hours = (datetime.now(timezone.utc) - published_time).total_seconds() / 3600
-    return round(views / hours, 2) if hours > 0 else 0
+    try: t = datetime.strptime(publishedAt,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except: return 0.0
+    hrs=(datetime.now(timezone.utc)-t).total_seconds()/3600
+    return round(views/hrs,2) if hrs>0 else 0.0
 
 def format_views(n):
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
-    elif n >= 1_000:
-        return f"{n/1_000:.1f}K"
+    try: n=int(n)
+    except: return str(n)
+    if n>=1_000_000: return f"{n/1_000_000:.1f}M"
+    if n>=1_000: return f"{n/1_000:.1f}K"
     return str(n)
 
-def format_time(publishedAt):
-    dt = datetime.strptime(publishedAt, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    delta = (datetime.now(timezone.utc) - dt).days
-    if delta < 1:
-        return "Hari ini"
-    elif delta < 30:
-        return f"{delta} hari lalu"
-    elif delta < 365:
-        return f"{delta//30} bulan lalu"
-    return f"{delta//365} tahun lalu"
+def format_rel_time(publishedAt):
+    try: dt=datetime.strptime(publishedAt,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except: return "-"
+    d=(datetime.now(timezone.utc)-dt).days
+    if d<1: return "Hari ini"
+    if d<30: return f"{d} hari lalu"
+    if d<365: return f"{d//30} bulan lalu"
+    return f"{d//365} tahun lalu"
 
-# === Panggil API YouTube ===
-def get_youtube_videos(api_key, query, max_results=15):
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        "part": "snippet",
-        "q": query,
-        "type": "video",
-        "maxResults": max_results,
-        "key": api_key
-    }
-    r = requests.get(url, params=params).json()
+def format_jam_utc(publishedAt):
+    try: dt=datetime.strptime(publishedAt,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc); return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except: return "-"
 
-    videos = []
-    video_ids = [item["id"]["videoId"] for item in r.get("items", [])]
+# ================== API ==================
+def yt_search_ids(api_key, query, order, max_results, video_type="all"):
+    params={"part":"snippet","q":query,"type":"video","order":order,"maxResults":max_results,"key":api_key}
+    if video_type=="short": params["videoDuration"]="short"
+    elif video_type=="regular": params["videoDuration"]="medium"
+    elif video_type=="live": params["eventType"]="live"
+    r=requests.get(SEARCH_URL,params=params).json()
+    return [it["id"]["videoId"] for it in r.get("items",[]) if it.get("id",{}).get("videoId")]
 
-    if not video_ids:
-        return []
-
-    stats_url = "https://www.googleapis.com/youtube/v3/videos"
-    stats_params = {
-        "part": "statistics,snippet",
-        "id": ",".join(video_ids),
-        "key": api_key
-    }
-    stats_r = requests.get(stats_url, params=stats_params).json()
-
-    for item in stats_r.get("items", []):
-        vid = {
-            "id": item["id"],
-            "title": item["snippet"]["title"],
-            "channel": item["snippet"]["channelTitle"],
-            "publishedAt": item["snippet"]["publishedAt"],
-            "views": int(item["statistics"].get("viewCount", 0)),
-            "thumbnail": item["snippet"]["thumbnails"]["high"]["url"],
+def yt_videos_detail(api_key, ids:list):
+    if not ids: return []
+    params={"part":"statistics,snippet,contentDetails","id":",".join(ids),"key":api_key}
+    r=requests.get(VIDEOS_URL,params=params).json()
+    out=[]
+    for it in r.get("items",[]):
+        snip,stats,det=it.get("snippet",{}),it.get("statistics",{}),it.get("contentDetails",{})
+        views=int(stats.get("viewCount",0)) if stats.get("viewCount") else 0
+        dur_s=iso8601_to_seconds(det.get("duration",""))
+        rec={
+            "id": it.get("id"),
+            "title": snip.get("title",""),
+            "channel": snip.get("channelTitle",""),
+            "publishedAt": snip.get("publishedAt",""),
+            "views": views,
+            "thumbnail": (snip.get("thumbnails",{}).get("high") or {}).get("url",""),
+            "duration_sec": dur_s,
+            "duration": fmt_duration(dur_s),
+            "live": snip.get("liveBroadcastContent","none")
         }
-        vid["vph"] = hitung_vph(vid["views"], vid["publishedAt"])
-        videos.append(vid)
+        rec["vph"]=hitung_vph(rec["views"], rec["publishedAt"])
+        out.append(rec)
+    return out
 
-    return videos
+def get_trending(api_key, region="US", max_results=15):
+    params={"part":"snippet,statistics,contentDetails","chart":"mostPopular","regionCode":region,"maxResults":max_results,"key":api_key}
+    r=requests.get(VIDEOS_URL,params=params).json()
+    return yt_videos_detail(api_key,[it["id"] for it in r.get("items",[])])
 
-# === Sorting ===
-def urutkan_video(data, mode):
-    if mode == "Paling Banyak Ditonton":
-        return sorted(data, key=lambda x: x["views"], reverse=True)
-    elif mode == "Terbaru":
-        return sorted(data, key=lambda x: x["publishedAt"], reverse=True)
-    elif mode == "VPH Tertinggi":
-        return sorted(data, key=lambda x: x["vph"], reverse=True)
-    else:  # relevan (default API)
-        return data
+# ================== Sort & Filter Helpers ==================
+def map_sort_option(sort_option: str):
+    if sort_option == "Paling Banyak Ditonton":
+        return "viewCount"
+    elif sort_option == "Terbaru":
+        return "date"
+    elif sort_option == "VPH Tertinggi":
+        return "date"  # ambil by date, sort manual di client
+    else:
+        return "relevance"
 
-# === Jalankan pencarian ===
+def apply_client_sort(items, sort_option: str):
+    if sort_option == "Paling Banyak Ditonton":
+        return sorted(items, key=lambda x: x.get("views", 0), reverse=True)
+    if sort_option == "Terbaru":
+        return sorted(items, key=lambda x: x.get("publishedAt", ""), reverse=True)
+    if sort_option == "VPH Tertinggi":
+        return sorted(items, key=lambda x: x.get("vph", 0.0), reverse=True)
+    return items
+
+def filter_by_video_type(items, video_type_label: str):
+    if video_type_label == "Short":
+        return [v for v in items if v.get("duration_sec", 0) <= 60]
+    if video_type_label == "Regular":
+        return [v for v in items if v.get("duration_sec", 0) > 60]
+    if video_type_label == "Live":
+        return [v for v in items if v.get("live", "none") == "live"]
+    return items
+
+# ================== Judul Generator ==================
+def top_keywords_from_titles(titles, topk=8):
+    words=[]
+    for t in titles:
+        for w in re.split(r"[^\w]+",t.lower()):
+            if len(w)>=3 and w not in STOPWORDS and not w.isdigit():
+                words.append(w)
+    cnt=Counter(words)
+    return [w for w,_ in cnt.most_common(topk)]
+
+def derive_duration_phrase(videos):
+    secs=[v["duration_sec"] for v in videos if v.get("duration_sec",0)>0]
+    if not secs: return "3 Hours"
+    avg=sum(secs)/len(secs)
+    if avg>=2*3600: return "3 Hours"
+    if avg>=3600: return "2 Hours"
+    if avg>=1800: return "1 Hour"
+    return "30 Minutes"
+
+def ensure_len(s, min_len=66):
+    if len(s)>=min_len: return s
+    pad=" | Focus • Study • Relax • Deep Sleep"
+    return s+pad
+
+def generate_titles_structured(keyword_main,videos,titles_all):
+    kw=keyword_main.strip() or "Healing Flute Meditation"
+    topk=top_keywords_from_titles(titles_all,8)
+    k1=(topk[0] if topk else "Relaxation").title()
+    k2=(topk[1] if len(topk)>1 else "Sleep").title()
+    dur=derive_duration_phrase(videos)
+    titles=[]
+    titles.append(f"Eliminate Stress & Anxiety | {kw.title()} for Deep Relaxation and Inner Peace")
+    titles.append(f"Heal Faster & Clear Mind | {kw.title()} Therapy for {k1} and {k2}")
+    titles.append(f"Emotional Detox & Calm | {kw.title()} – Release Negativity, Find Balance")
+    titles.append(f"{kw.title()} | Deep Calm and Healing Energy for Sleep & Meditation")
+    titles.append(f"{kw.title()} | Stress Relief and Emotional Reset for Night Routine")
+    titles.append(f"{kw.title()} | Gentle Sounds to Focus, Study and Inner Healing")
+    titles.append(f"{dur} | {kw.title()} – Reduce Overthinking, Fall Asleep Fast")
+    titles.append(f"{dur} Non-Stop | {kw.title()} – Relax Mind, Boost Serotonin")
+    titles.append(f"10 Hours Loop | {kw.title()} – Deep Meditation and Emotional Balance")
+    titles.append(f"{dur} | {kw.title()} – Perfect for Yoga, Sleep and Stress Detox")
+    return [ensure_len(t) for t in titles[:10]]
+
+# ================== MAIN ==================
 if submit:
-    with st.spinner("Mengambil data dari YouTube..."):
-        videos = get_youtube_videos(st.session_state.api_key, keyword)
-        videos = urutkan_video(videos, sort_option)
+    if not keyword.strip():
+        st.info(f"📈 Menampilkan trending di {region_name}")
+        videos_all=get_trending(st.session_state.api_key,region=region,max_results=max_per_order)
+    else:
+        st.info(f"🔎 Riset keyword: {keyword}")
+        vtype_map={"Semua":"all","Regular":"regular","Short":"short","Live":"live"}
+        order=map_sort_option(sort_option)
+        ids=yt_search_ids(st.session_state.api_key,keyword,order,max_per_order,vtype_map[video_type])
+        videos_all=yt_videos_detail(st.session_state.api_key,ids)
 
-    if not videos:
+    # Terapkan filter tipe video & sort manual di client
+    videos_all = filter_by_video_type(videos_all, video_type)
+    videos_all = apply_client_sort(videos_all, sort_option)
+
+    if not videos_all:
         st.error("❌ Tidak ada video ditemukan")
     else:
-        st.success(f"{len(videos)} video ditemukan")
-
-        # === Tampilkan Video dengan Badge ===
-        cols = st.columns(3)
-        all_titles = []
-        for i, v in enumerate(videos):
-            with cols[i % 3]:
-                st.image(v["thumbnail"])
-                st.markdown(f"**[{v['title']}]({'https://www.youtube.com/watch?v=' + v['id']})**")
+        # tampilkan video
+        cols=st.columns(3)
+        all_titles=[]; rows_for_csv=[]
+        for i,v in enumerate(videos_all):
+            with cols[i%3]:
+                if v["thumbnail"]: st.image(v["thumbnail"])
+                st.markdown(f"**[{v['title']}]({'https://www.youtube.com/watch?v='+v['id']})**")
                 st.caption(v["channel"])
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown(
-                        f"<div style='background:#ff4b4b;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>👁 {format_views(v['views'])} views</div>",
-                        unsafe_allow_html=True
-                    )
-                with col2:
-                    st.markdown(
-                        f"<div style='background:#4b8bff;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>⚡ {v['vph']} VPH</div>",
-                        unsafe_allow_html=True
-                    )
-                with col3:
-                    st.markdown(
-                        f"<div style='background:#4caf50;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>⏱ {format_time(v['publishedAt'])}</div>",
-                        unsafe_allow_html=True
-                    )
-
+                c1,c2,c3=st.columns(3)
+                with c1: st.markdown(f"<div style='background:#ff4b4b;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>👁 {format_views(v['views'])} views</div>",unsafe_allow_html=True)
+                with c2: st.markdown(f"<div style='background:#4b8bff;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>⚡ {v['vph']} VPH</div>",unsafe_allow_html=True)
+                with c3: st.markdown(f"<div style='background:#4caf50;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>⏱ {format_rel_time(v['publishedAt'])}</div>",unsafe_allow_html=True)
+                st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
             all_titles.append(v["title"])
+            rows_for_csv.append({"Judul":v["title"],"Channel":v["channel"],"Views":v["views"],"VPH":v["vph"],
+                "Tanggal":format_rel_time(v["publishedAt"]),"Jam Publish":format_jam_utc(v["publishedAt"]),
+                "Durasi":v.get("duration","-"),"Link":f"https://www.youtube.com/watch?v={v['id']}"})
 
-        # === Rekomendasi Judul ===
-        st.subheader("💡 Rekomendasi Judul untuk Dipakai")
-        for r in all_titles[:5]:
-            st.text_input("Copy Judul", r)
+        # Judul
+        st.subheader("💡 Rekomendasi Judul (10 Judul)")
+        rec_titles=generate_titles_structured(keyword,videos_all,all_titles)
+        for idx,rt in enumerate(rec_titles,1):
+            col1,col2=st.columns([8,1])
+            with col1: st.text_input(f"Judul {idx}",rt,key=f"judul_{idx}")
+            with col2: st.button("📋",key=f"copy_judul_{idx}",help="Salin judul",on_click=lambda t=rt: st.session_state.update({"copied":t}))
 
-        # === Auto Tag 500 karakter ===
-        st.subheader("🏷️ Rekomendasi Tag (Max 500 karakter)")
-        kata_unik = []
+        if "copied" in st.session_state:
+            st.success(f"Judul tersalin: {st.session_state['copied']}")
+            st.session_state.pop("copied")
+
+        # Tag
+        st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
+        uniq_words,seen=[],set()
         for t in all_titles:
-            for w in t.split():
-                w = w.lower().strip("|,.-")
-                if w not in kata_unik:
-                    kata_unik.append(w)
+            for w in re.split(r"[^\w]+",t.lower()):
+                if len(w)>=3 and w not in STOPWORDS and w not in seen:
+                    uniq_words.append(w); seen.add(w)
+        tag_string=", ".join(uniq_words)
+        if len(tag_string)>500: tag_string=tag_string[:497]+"..."
+        col1,col2=st.columns([8,1])
+        with col1: st.text_area("Tag",tag_string,height=100)
+        with col2: st.button("📋",key="copy_tag",help="Salin tag",on_click=lambda t=tag_string: st.session_state.update({"copied_tag":t}))
+        if "copied_tag" in st.session_state:
+            st.success("✅ Tag tersalin!")
+            st.session_state.pop("copied_tag")
 
-        tag_string = ", ".join(kata_unik)
-        if len(tag_string) > 500:
-            tag_string = tag_string[:497] + "..."
-
-        st.code(tag_string, language="text")
-        st.text_input("Copy Tag", tag_string)
+        # Download CSV
+        st.subheader("⬇️ Download Data")
+        df=pd.DataFrame(rows_for_csv)
+        st.download_button("Download CSV",df.to_csv(index=False).encode("utf-8"),"youtube_riset.csv","text/csv")
