@@ -35,6 +35,7 @@ if not st.session_state.api_key:
 with st.form("youtube_form"):
     keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation")
     sort_option = st.selectbox("Urutkan:", ["Paling Relevan","Paling Banyak Ditonton","Terbaru","VPH Tertinggi"])
+    video_type = st.radio("Tipe Video", ["Semua","Regular","Short","Live"])
     submit = st.form_submit_button("🔍 Cari Video")
 
 # ================== Utils ==================
@@ -110,7 +111,7 @@ def get_trending(api_key, max_results=15):
     r=requests.get(VIDEOS_URL,params=params).json()
     return yt_videos_detail(api_key,[it["id"] for it in r.get("items",[])])
 
-# ================== Sort ==================
+# ================== Sort & Filter ==================
 def map_sort_option(sort_option: str):
     if sort_option == "Paling Banyak Ditonton":
         return "viewCount"
@@ -128,6 +129,15 @@ def apply_client_sort(items, sort_option: str):
         return sorted(items, key=lambda x: x.get("publishedAt", ""), reverse=True)
     if sort_option == "VPH Tertinggi":
         return sorted(items, key=lambda x: x.get("vph", 0.0), reverse=True)
+    return items
+
+def filter_by_video_type(items, video_type_label: str):
+    if video_type_label == "Short":
+        return [v for v in items if v.get("duration_sec", 0) <= 60]
+    if video_type_label == "Regular":
+        return [v for v in items if v.get("duration_sec", 0) > 60]
+    if video_type_label == "Live":
+        return [v for v in items if v.get("live", "none") == "live"]
     return items
 
 # ================== Judul Generator ==================
@@ -160,17 +170,23 @@ def generate_titles_structured(keyword_main,videos,titles_all):
     k1=(topk[0] if topk else "Relaxation").title()
     k2=(topk[1] if len(topk)>1 else "Sleep").title()
     dur=derive_duration_phrase(videos)
+
     titles=[]
-    titles.append(f"Eliminate Stress & Anxiety | {kw.title()} for Deep Relaxation and Inner Peace")
-    titles.append(f"Heal Faster & Clear Mind | {kw.title()} Therapy for {k1} and {k2}")
-    titles.append(f"Emotional Detox & Calm | {kw.title()} – Release Negativity, Find Balance")
-    titles.append(f"{kw.title()} | Deep Calm and Healing Energy for Sleep & Meditation")
-    titles.append(f"{kw.title()} | Stress Relief and Emotional Reset for Night Routine")
+    # Pola 1
+    titles.append(f"Eliminate Stress & Anxiety | {kw.title()} for Deep {k1}")
+    titles.append(f"Heal Faster & Clear Mind | {kw.title()} Therapy for {k2}")
+
+    # Pola 2
+    titles.append(f"{kw.title()} | Deep Calm and Healing Energy for {k1}")
+    titles.append(f"{kw.title()} | Stress Relief and Emotional Reset for {k2}")
     titles.append(f"{kw.title()} | Gentle Sounds to Focus, Study and Inner Healing")
+
+    # Pola 3
     titles.append(f"{dur} | {kw.title()} – Reduce Overthinking, Fall Asleep Fast")
     titles.append(f"{dur} Non-Stop | {kw.title()} – Relax Mind, Boost Serotonin")
     titles.append(f"10 Hours Loop | {kw.title()} – Deep Meditation and Emotional Balance")
     titles.append(f"{dur} | {kw.title()} – Perfect for Yoga, Sleep and Stress Detox")
+
     return [ensure_len(t) for t in titles[:10]]
 
 # ================== MAIN ==================
@@ -184,6 +200,7 @@ if submit:
         ids=yt_search_ids(st.session_state.api_key,keyword,order,max_per_order)
         videos_all=yt_videos_detail(st.session_state.api_key,ids)
 
+    videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
 
     if not videos_all:
@@ -197,9 +214,9 @@ if submit:
                 st.markdown(f"**[{v['title']}]({'https://www.youtube.com/watch?v='+v['id']})**")
                 st.caption(v["channel"])
                 c1,c2,c3=st.columns(3)
-                with c1: st.markdown(f"<div style='background:#ff4b4b;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>👁 {format_views(v['views'])} views</div>",unsafe_allow_html=True)
-                with c2: st.markdown(f"<div style='background:#4b8bff;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>⚡ {v['vph']} VPH</div>",unsafe_allow_html=True)
-                with c3: st.markdown(f"<div style='background:#4caf50;color:white;padding:4px 8px;border-radius:6px;display:inline-block'>⏱ {format_rel_time(v['publishedAt'])}</div>",unsafe_allow_html=True)
+                with c1: st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 6px;border-radius:6px;display:inline-block'>👁 {format_views(v['views'])} views</div>",unsafe_allow_html=True)
+                with c2: st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 6px;border-radius:6px;display:inline-block'>⚡ {v['vph']} VPH</div>",unsafe_allow_html=True)
+                with c3: st.markdown(f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 6px;border-radius:6px;display:inline-block'>⏱ {format_rel_time(v['publishedAt'])}</div>",unsafe_allow_html=True)
                 st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
             all_titles.append(v["title"])
             rows_for_csv.append({"Judul":v["title"],"Channel":v["channel"],"Views":v["views"],"VPH":v["vph"],
