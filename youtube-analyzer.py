@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import re
 import io
 import zipfile
+import html as html_lib
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -22,6 +23,7 @@ if "gemini_api" not in st.session_state: st.session_state.gemini_api = ""
 if "auto_ideas" not in st.session_state: st.session_state.auto_ideas = None
 if "last_results" not in st.session_state: st.session_state.last_results = []
 if "popup_video" not in st.session_state: st.session_state.popup_video = None
+if "ai_cache" not in st.session_state: st.session_state.ai_cache = {}   # {video_id: {task: text}}
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
@@ -161,7 +163,7 @@ def filter_by_video_type(items, video_type_label: str):
         return [v for v in items if v.get("live", "none") == "live"]
     return items
 
-# ---------------- Judul Generator ----------------
+# ---------------- Judul Generator (list 10) ----------------
 def trim_to_100(text):
     if len(text) <= 100: return text
     trimmed = text[:100]
@@ -191,6 +193,120 @@ def generate_titles_from_data(videos, sort_option):
     rekomendasi.append(trim_to_100(gabungan))
     return [trim_to_100(t) for t in rekomendasi[:10]]
 
+# ---------------- Gemini helpers ----------------
+def use_gemini():
+    return bool(st.session_state.gemini_api)
+
+def gemini_generate(prompt: str) -> str:
+    if not use_gemini():
+        return ""
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=st.session_state.gemini_api)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        resp = model.generate_content(prompt)
+        return resp.text if hasattr(resp, "text") else ""
+    except Exception as e:
+        return f"❌ Error Gemini: {e}"
+
+def content_type(v):
+    if v.get("live") == "live": return "Live"
+    if v.get("duration_sec", 0) <= 60: return "Short"
+    return "Regular"
+
+# ---------------- AI tasks (with fallback) ----------------
+def ai_summary(v):
+    title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
+    base = f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
+    if use_gemini():
+        return gemini_generate(
+            f"Ringkas video berdasarkan informasi berikut menjadi 5 poin bullet berbahasa Indonesia, fokus manfaat untuk penonton, hindari klaim berlebihan:\n\n{base}"
+        )
+    # fallback ringkas: ambil kalimat pertama/utama
+    sentences = re.split(r'(?<=[.!?])\s+', desc)[:5]
+    if not sentences: sentences = [title]
+    bullets = "\n".join(f"- {s}" for s in sentences)
+    return f"**Ringkasan (heuristik)**\n{bullets}"
+
+def ai_alt_titles(v):
+    ct = content_type(v)
+    if use_gemini():
+        return gemini_generate(
+            f"Buat 10 judul alternatif YouTube (≤100 karakter) dalam bahasa Indonesia untuk video '{v['title']}'. "
+            f"Format konten: {ct}. Variasikan gaya (angka, kurung, pertanyaan), klik-worthy namun bukan clickbait. Output sebagai daftar bernomor."
+        )
+    # fallback: variasi sederhana
+    base = v["title"]
+    variants = [
+        trim_to_100(base),
+        trim_to_100(f"{base} | Versi Lengkap"),
+        trim_to_100(f"{base} (Tips & Trik)"),
+        trim_to_100(f"Rahasia {base} Terungkap!"),
+        trim_to_100(f"{base}: Cara Praktis"),
+        trim_to_100(f"{base} untuk Pemula"),
+        trim_to_100(f"{base} dalam 60 Detik"),
+        trim_to_100(f"{base} [Panduan 2025]"),
+        trim_to_100(f"Kenapa {base}? Jawabannya di Sini"),
+        trim_to_100(f"{base} | Tutorial Singkat")
+    ]
+    return "\n".join(f"{i+1}. {t}" for i, t in enumerate(variants))
+
+def ai_script_outline(v):
+    ct = content_type(v)
+    title = v["title"]
+    if use_gemini():
+        return gemini_generate(
+            f"Buat kerangka skrip video YouTube berbahasa Indonesia untuk '{title}'. "
+            f"Format: {ct}. Sertakan: HOOK, Intro, 3–6 Bagian Utama, CTA. "
+            f"Untuk Short, buat super ringkas (≤60 detik); untuk Live, gunakan segmen pembuka, agenda, interaksi chat, checkpoint, closing."
+        )
+    # fallback
+    if ct == "Short":
+        return ("HOOK (0-3s): Pancing rasa penasaran.\n"
+                "INTI (3-50s): 3 poin cepat bernilai.\n"
+                "CTA (50-60s): Ajak follow/subscribe & video terkait.")
+    if ct == "Live":
+        return ("Opening (0-2m): Sapaan & value promise.\n"
+                "Agenda: 3-5 topik.\n"
+                "Interaksi: Q&A tiap 10-15 menit.\n"
+                "Checkpoint: ringkas poin utama.\n"
+                "Closing: CTA & jadwal live berikutnya.")
+    return ("Hook (0-10s) → Intro (10-30s) → Bagian 1 → Bagian 2 → Bagian 3 → "
+            "Rekap → CTA (subscribe/next video).")
+
+def ai_thumb_ideas(v):
+    title = v["title"]
+    kw = ", ".join(sorted({w for w in re.split(r"[^\w]+", (title + " " + v.get('description','')).lower())
+                           if len(w)>=4 and w not in STOPWORDS})[:8])
+    if use_gemini():
+        return gemini_generate(
+            f"Buat 5 ide thumbnail untuk video '{title}' dalam bahasa Indonesia. "
+            f"Setiap ide berupa 1 baris: konsep visual + gaya + komposisi + teks singkat (≤3 kata). "
+            f"Berikan juga 1 prompt contoh generatif (Midjourney-style) per ide. Kata kunci: {kw}."
+        )
+    # fallback
+    ideas = [
+        f"Close-up objek utama + teks 2 kata kuat\nPrompt: ultra-detailed close-up, dramatic lighting, high contrast, bold 2-word overlay",
+        f"Before/After split screen\nPrompt: split-screen comparison, left dull, right vibrant, cinematic, 16:9, bold arrow",
+        f"Wajah ekspresif menunjuk objek\nPrompt: person pointing, surprised face, shallow depth, crisp text label",
+        f"Minimalis ikon + latar kontras\nPrompt: flat icon center, vivid gradient background, clean typography",
+        f"Diagram sederhana 3 langkah\nPrompt: step-by-step infographic, large numbers 1-2-3, bright colors"
+    ]
+    return "\n\n".join(ideas)
+
+def ai_seo_tags(v):
+    base_text = (v["title"] + " " + v.get("description","")).lower()
+    words = [w for w in re.split(r"[^\w]+", base_text) if len(w)>=3 and w not in STOPWORDS]
+    uniq = list(dict.fromkeys(words))[:40]
+    fallback = ", ".join(uniq)[:500]
+    if use_gemini():
+        text = gemini_generate(
+            f"Buat daftar tag SEO (dipisahkan koma, max 500 karakter) untuk video YouTube berbahasa Indonesia. "
+            f"Gunakan kata kunci dari judul & deskripsi berikut:\n\nJudul: {v['title']}\nDeskripsi: {v.get('description','')[:1500]}\n"
+        )
+        return text if text else fallback
+    return fallback
+
 # ---------------- Handle submit: fetch & store ----------------
 if submit:
     if not keyword.strip():
@@ -206,13 +322,10 @@ if submit:
     videos_all = apply_client_sort(videos_all, sort_option)
     st.session_state.last_results = videos_all
 
-    # (Opsional) generate ide Gemini
+    # Auto ideas (opsional)
     st.session_state.auto_ideas = None
-    if videos_all and st.session_state.gemini_api:
+    if videos_all and use_gemini():
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=st.session_state.gemini_api)
-            model = genai.GenerativeModel("gemini-1.5-flash")
             top_titles = [v["title"] for v in videos_all[:5]]
             titles_text = "\n".join([f"- {t}" for t in top_titles])
             keywords = []
@@ -227,37 +340,28 @@ if submit:
             if short_count > max(live_count, regular_count): fmt = "Short (≤60 detik)"
             elif live_count > max(short_count, regular_count): fmt = "Live Streaming"
             else: fmt = "Video Reguler (5–30 menit)"
-            prompt = f"""
-Berdasarkan hasil pencarian video YouTube:
-{titles_text}
-
-Kata kunci turunan: {derived_kw}
-Jenis konten dominan: {fmt}
-
-Buatkan 5 ide konten video baru yang relevan.
-"""
-            resp = model.generate_content(prompt)
-            st.session_state.auto_ideas = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
+            st.session_state.auto_ideas = gemini_generate(
+                f"Berdasarkan judul-judul:\n{titles_text}\n\nKata kunci turunan: {derived_kw}\n"
+                f"Jenis konten dominan: {fmt}\nBuatkan 5 ide video lengkap dengan SIAPA/APA/BAGAIMANA dan IDE VISUAL (1 per ide)."
+            )
         except Exception as e:
             st.session_state.auto_ideas = f"❌ Error Gemini: {e}"
 
-# ---------------- Render results from state ----------------
+# ---------------- Render results ----------------
 videos_to_show = st.session_state.last_results
 
-# CSS agar tombol judul tampak seperti link
+# CSS sederhana (badge & link-like title)
 st.markdown("""
 <style>
-.linklike > button { 
-  background:none !important; border:none !important; padding:0 !important; 
-  color:#1f6feb; text-decoration:none; font-weight:600; cursor:pointer;
-}
-.linklike > button:hover { text-decoration:underline; }
 .badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px;
          border-radius:4px; font-weight:700; }
 .badge-live { background:#e53935; }
 .badge-short{ background:#1e88e5; }
 .thumbwrap { position:relative; }
 img.thumb { width:100%; border-radius:10px; display:block; }
+.linklike > button { background:none !important; border:none !important; padding:0 !important;
+                     color:#1f6feb; text-decoration:none; font-weight:600; cursor:pointer; }
+.linklike > button:hover { text-decoration:underline; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -266,16 +370,19 @@ if videos_to_show:
     all_titles, rows_for_csv = [], []
     for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
-            # Thumbnail (display only)
+            # Thumbnail (display)
             badge_html = ""
             if v.get("live") == "live": badge_html = '<div class="badge badge-live">LIVE</div>'
             elif v.get("duration_sec", 0) <= 60: badge_html = '<div class="badge badge-short">SHORT</div>'
             if v.get("thumbnail"):
-                st.markdown(f'<div class="thumbwrap">{badge_html}<img class="thumb" src="{v["thumbnail"]}"></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="thumbwrap">{badge_html}<img class="thumb" src="{v["thumbnail"]}"></div>',
+                            unsafe_allow_html=True)
 
-            # Title as link-like button (this triggers popup without navigation)
-            if st.container().button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview", type="secondary"):
+            # Title as link-like button → open popup (no navigation)
+            st.markdown('<div class="linklike">', unsafe_allow_html=True)
+            if st.button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview"):
                 st.session_state.popup_video = v
+            st.markdown('</div>', unsafe_allow_html=True)
 
             st.caption(v["channel"])
             c1, c2, c3 = st.columns(3)
@@ -291,38 +398,61 @@ if videos_to_show:
             "Durasi": v.get("duration","-"), "Link": f"https://www.youtube.com/watch?v={v['id']}"
         })
 
-    # Popup detail (no navigation)
+    # -------- Popup detail + AI tools --------
     if st.session_state.popup_video:
         v = st.session_state.popup_video
+        vid = v["id"]
         st.markdown("---")
         st.subheader("📺 Video Detail")
-        st.video(f"https://www.youtube.com/watch?v={v['id']}")
+        st.video(f"https://www.youtube.com/watch?v={vid}")
         st.markdown(f"### {v['title']}")
         st.caption(v["channel"])
         st.write(v.get("description", "Tidak ada deskripsi."))
 
         st.subheader("✨ Asisten Konten AI")
-        col1, col2 = st.columns(2)
-        with col1: st.button("📑 Ringkas Video Ini", key="ai_summary")
-        with col2: st.button("✍️ Buat Judul Alternatif", key="ai_titles")
-        col3, col4 = st.columns(2)
-        with col3: st.button("📝 Buat Kerangka Skrip", key="ai_script")
-        with col4: st.button("🖼️ Buat Ide Thumbnail", key="ai_thumb")
-        st.button("🏷️ Buat Tag SEO", key="ai_tags")
+
+        # helper cache accessors
+        def cache_get(task): return st.session_state.ai_cache.get(vid, {}).get(task)
+        def cache_set(task, text):
+            st.session_state.ai_cache.setdefault(vid, {})[task] = text
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            if st.button("🧾 Ringkas Video Ini", key=f"btn_summary_{vid}"):
+                cache_set("summary", ai_summary(v))
+            if cache_get("summary"):
+                st.markdown(cache_get("summary"))
+
+            if st.button("📝 Buat Kerangka Skrip", key=f"btn_script_{vid}"):
+                cache_set("script", ai_script_outline(v))
+            if cache_get("script"):
+                st.markdown(cache_get("script"))
+
+            if st.button("🔑 Buat Tag SEO", key=f"btn_tags_{vid}"):
+                cache_set("tags", ai_seo_tags(v))
+            if cache_get("tags"):
+                st.text_area("Tag SEO", cache_get("tags"), height=120, key=f"tags_area_{vid}")
+
+        with c2:
+            if st.button("✍️ Buat Judul Alternatif", key=f"btn_titles_{vid}"):
+                cache_set("alt_titles", ai_alt_titles(v))
+            if cache_get("alt_titles"):
+                st.markdown(cache_get("alt_titles"))
+
+            if st.button("🖼️ Buat Ide Thumbnail", key=f"btn_thumb_{vid}"):
+                cache_set("thumbs", ai_thumb_ideas(v))
+            if cache_get("thumbs"):
+                st.markdown(cache_get("thumbs"))
 
         if v.get("channelId"):
             st.markdown(f"[🌐 Kunjungi Channel YouTube](https://www.youtube.com/channel/{v['channelId']})")
 
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
-            if "open" in st.query_params:  # API baru
-                try:
-                    del st.query_params["open"]
-                except Exception:
-                    pass
             st.rerun()
 
-    # Titles suggestion
+    # -------- Rekomendasi Judul & Tag --------
     st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
     rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "Paling Relevan"))
     for idx, rt in enumerate(rec_titles, 1):
@@ -334,7 +464,6 @@ if videos_to_show:
         st.success(f"Judul tersalin: {st.session_state['copied']}")
         st.session_state.pop("copied")
 
-    # Tags suggestion
     st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
     uniq_words, seen = [], set()
     for t in all_titles:
@@ -343,6 +472,7 @@ if videos_to_show:
                 uniq_words.append(w); seen.add(w)
     tag_string = ", ".join(uniq_words)
     if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
+
     col1, col2 = st.columns([8, 1])
     with col1: st.text_area("Tag", tag_string, height=100, key="tag_area")
     with col2: st.button("📋", key="copy_tag", on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
@@ -350,18 +480,20 @@ if videos_to_show:
         st.success("✅ Tag tersalin!")
         st.session_state.pop("copied_tag")
 
-    # Downloads
+    # -------- Downloads --------
     st.subheader("⬇️ Download Data")
     df = pd.DataFrame(rows_for_csv)
     csv_video_bytes = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV (Video)", csv_video_bytes, "youtube_riset.csv", "text/csv", key="dl_csv")
+
     if st.session_state.auto_ideas:
         ideas_txt_bytes = st.session_state.auto_ideas.encode("utf-8")
         st.download_button("Download Ide (TXT)", ideas_txt_bytes, "auto_ideas.txt", "text/plain", key="dl_txt")
+
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("youtube_riset.csv", csv_video_bytes)
             zf.writestr("auto_ideas.txt", ideas_txt_bytes)
         st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
 else:
-    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik judul untuk membuka preview.")
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik judul untuk membuka preview. Tombol Asisten Konten AI ada di dalam popup.")
