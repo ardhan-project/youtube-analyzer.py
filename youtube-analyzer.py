@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import re
 import io
 import zipfile
+from collections import Counter
 import html as html_lib
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
@@ -230,8 +231,19 @@ def content_type(v):
     if v.get("duration_sec", 0) <= 60: return "Short"
     return "Regular"
 
+# ------------- Tren token dari VPH tertinggi -------------
+def top_vph_tokens(n=20):
+    vids = st.session_state.get("last_results", [])
+    top = sorted(vids, key=lambda x: x.get("vph", 0), reverse=True)[:10]
+    tokens = []
+    for vv in top:
+        for w in re.split(r"[^\w]+", vv["title"].lower()):
+            if 3 <= len(w) <= 18 and w not in STOPWORDS:
+                tokens.append(w)
+    common = [w for w, _ in Counter(tokens).most_common(n)]
+    return common
+
 # ---------------- AI tasks ----------------
-# NOTE: Hanya ALT TITLES & SEO TAGS yang bilingual (ID/EN). Lainnya selalu bahasa Indonesia.
 def ai_summary(v):
     title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
     if use_gemini():
@@ -244,50 +256,156 @@ def ai_summary(v):
     bullets = "\n".join(f"- {s}" for s in sentences)
     return f"**Ringkasan (heuristik)**\n{bullets}"
 
+# ====== (BARU) Judul Alternatif yang disempurnakan ======
 def ai_alt_titles(v):
+    """
+    Menghasilkan 10 judul alternatif:
+    - Mengikuti bahasa judul (ID/EN)
+    - Format-aware (Short/Live/Reguler)
+    - Memakai token tren dari VPH tertinggi
+    - ≤100 karakter, variasi angka/brackets, tahun berjalan
+    - Menghormati preferensi UI (style, angka, brackets, jadwal live)
+    """
     ct = content_type(v)
-    lang = detect_lang(v["title"])  # mengikuti bahasa judul
-    if use_gemini():
-        if lang == "en":
-            return gemini_generate(
-                f"Write 10 alternative YouTube titles (≤100 chars) in ENGLISH for the video '{v['title']}'. "
-                f"Keep the same topic. Mix styles: numbers, brackets, questions, power words. "
-                f"Content format: {ct}. Output as a numbered list."
+    lang = detect_lang(v["title"])
+    vid = v["id"]
+    year = datetime.now().year
+
+    # Preferensi dari UI popup (kalau ada)
+    style = st.session_state.get(f"title_style_{vid}", "Auto")
+    use_num = st.session_state.get(f"use_num_{vid}", True)
+    use_brackets = st.session_state.get(f"use_brackets_{vid}", True)
+    tf = st.session_state.get(f"timeframe_{vid}", "").strip() if ct == "Live" else ""
+
+    base = v["title"].strip()
+    words = [w for w in re.split(r"[^\w]+", base.lower()) if len(w) >= 3 and w not in STOPWORDS]
+    kw_main = words[0] if words else base.split(" ")[0]
+    trending = [w for w in top_vph_tokens(20) if w not in {kw_main}][:3]
+    kw2 = trending[0] if trending else ""
+
+    # Komponen variatif
+    numbers = [3, 5, 7] if use_num else [""]
+    bracket_open, bracket_close = ("[", "]") if use_brackets else ("", "")
+    live_prefix = (f"LIVE {tf} | " if tf else "LIVE | ") if ct == "Live" else ""
+    short_hint_id = ["30 Detik", "1 Menit", "Cepat"] if ct == "Short" else []
+    short_hint_en = ["30 Sec", "1 Minute", "Quick"] if ct == "Short" else []
+
+    # Bank frasa manfaat
+    benefits_id = ["Tanpa Ribet", "Untuk Pemula", "Hasil Maksimal", "Lebih Cepat", "Langkah Mudah"]
+    benefits_en = ["No Hassle", "For Beginners", "Max Results", "Faster", "Easy Steps"]
+
+    # Pola per gaya
+    patterns_id = []
+    patterns_en = []
+
+    if style in ("Auto", "Edu", "How-To"):
+        patterns_id += [
+            "{kw_main}: {benefit} ({num} Langkah)",
+            "Tutorial {kw_main} {year} | {benefit}",
+            "{kw_main} untuk Pemula: {benefit}",
+            "Cara {kw_main} {year}: {benefit}",
+        ]
+        patterns_en += [
+            "{kw_main}: {benefit} ({num} Steps)",
+            "{kw_main} Tutorial {year} | {benefit}",
+            "{kw_main} for Beginners: {benefit}",
+            "How to {kw_main} {year}: {benefit}",
+        ]
+    if style in ("Auto", "Hype"):
+        patterns_id += [
+            "Rahasia {kw_main}: {benefit}!",
+            "{kw_main} {brk_open}{year}{brk_close} — {benefit}",
+        ]
+        patterns_en += [
+            "The Secret to {kw_main}: {benefit}!",
+            "{kw_main} {brk_open}{year}{brk_close} — {benefit}",
+        ]
+    if style in ("Auto", "Listicle"):
+        patterns_id += [
+            "{num} Trik {kw_main} yang Wajib Coba",
+            "{num} Kesalahan {kw_main} (Hindari Ini!)",
+        ]
+        patterns_en += [
+            "Top {num} {kw_main} Tricks You Must Try",
+            "{num} {kw_main} Mistakes (Avoid These!)",
+        ]
+    if style in ("Auto", "Problem/Solution"):
+        patterns_id += [
+            "Solusi {kw_main}: {benefit} {brk_open}{year}{brk_close}",
+            "{kw_main} Gagal? Coba Ini ({num} Langkah)",
+        ]
+        patterns_en += [
+            "Fix {kw_main}: {benefit} {brk_open}{year}{brk_close}",
+            "{kw_main} Failing? Try This ({num} Steps)",
+        ]
+
+    # Penyesuaian format
+    if ct == "Short":
+        patterns_id += [
+            f"{short_hint_id[0] if short_hint_id else ''}: {{kw_main}} — {{benefit}}",
+            "1 Menit {kw_main}: {benefit}",
+        ]
+        patterns_en += [
+            f"{short_hint_en[0] if short_hint_en else ''}: {{kw_main}} — {{benefit}}",
+            "1 Minute {kw_main}: {benefit}",
+        ]
+    if ct == "Live":
+        patterns_id += [
+            f"{live_prefix}{{kw_main}} + {kw2} (Q&A)",
+            f"{live_prefix}Workshop {{kw_main}}: {{benefit}}",
+        ]
+        patterns_en += [
+            f"{live_prefix}{{kw_main}} + {kw2} (Q&A)",
+            f"{live_prefix}Workshop {{kw_main}}: {{benefit}}",
+        ]
+
+    # Render kandidat
+    benefits = benefits_id if lang == "id" else benefits_en
+    pats = patterns_id if lang == "id" else patterns_en
+
+    candidates = []
+    for p in pats:
+        for num in numbers:
+            txt = p.format(
+                kw_main=kw_main.capitalize() if lang == "en" else kw_main.title(),
+                benefit=benefits[len(candidates) % len(benefits)],
+                num=num if num != "" else 3,
+                year=year,
+                brk_open=bracket_open, brk_close=bracket_close
             )
-        else:
-            return gemini_generate(
-                f"Buat 10 judul alternatif YouTube (≤100 karakter) dalam BAHASA INDONESIA untuk video '{v['title']}'. "
-                f"Sesuai topik asli. Variasikan gaya (angka, kurung, pertanyaan). "
-                f"Format konten: {ct}. Tulis sebagai daftar bernomor."
-            )
-    base = v["title"]
+            # Bersihkan double spasi/simbol
+            txt = re.sub(r"\s+", " ", txt).strip(" -|")
+            candidates.append(trim_to_100(txt))
+
+    # Tambahkan varian sederhana berbasis judul asli
     if lang == "en":
-        variants = [
-            trim_to_100(base),
-            trim_to_100(f"{base} | Full Guide"),
-            trim_to_100(f"{base} (Tips & Tricks)"),
-            trim_to_100(f"{base}: Step-by-Step"),
-            trim_to_100(f"Master {base} in Minutes"),
-            trim_to_100(f"{base} for Beginners"),
-            trim_to_100(f"{base} Explained!"),
-            trim_to_100(f"Top 5 {base} Hacks"),
-            trim_to_100(f"{base} [2025 Update]"),
-            trim_to_100(f"Why {base}? The Truth")
+        candidates += [
+            trim_to_100(f"{kw_main.capitalize()} Explained ({year})"),
+            trim_to_100(f"{kw_main.capitalize()} | Quick Guide"),
         ]
     else:
-        variants = [
-            trim_to_100(base),
-            trim_to_100(f"{base} | Panduan Lengkap"),
-            trim_to_100(f"{base} (Tips & Trik)"),
-            trim_to_100(f"{base}: Langkah demi Langkah"),
-            trim_to_100(f"Kuasi {base} dalam Hitungan Menit"),
-            trim_to_100(f"{base} untuk Pemula"),
-            trim_to_100(f"{base} Tuntas!"),
-            trim_to_100(f"5 Trik {base} Teratas"),
-            trim_to_100(f"{base} [Update 2025]"),
-            trim_to_100(f"Kenapa {base}? Ini Alasannya")
+        candidates += [
+            trim_to_100(f"{kw_main.title()} Tuntas ({year})"),
+            trim_to_100(f"{kw_main.title()} | Panduan Singkat"),
         ]
-    return "\n".join(f"{i+1}. {t}" for i, t in enumerate(variants))
+
+    # Dedupe & filter
+    seen, final = set(), []
+    for t in candidates:
+        key = t.lower()
+        if key not in seen and 10 <= len(t) <= 100:
+            seen.add(key)
+            final.append(t)
+        if len(final) >= 10:
+            break
+
+    # fallback jika kurang
+    while len(final) < 10:
+        extra = trim_to_100(f"{kw_main.title()} {year} | Tips")
+        if extra.lower() in seen: break
+        final.append(extra); seen.add(extra.lower())
+
+    return "\n".join(f"{i+1}. {t}" for i, t in enumerate(final, start=1))
 
 def ai_script_outline(v):
     ct = content_type(v)
@@ -468,8 +586,19 @@ if videos_to_show:
                 st.text_area("Tag SEO", cache_get("tags"), height=120, key=f"tags_area_{vid}")
 
         with c2:
+            # ----- Kontrol gaya judul -----
+            st.selectbox(
+                "Gaya Judul",
+                ["Auto","Edu","Hype","Listicle","How-To","Problem/Solution"],
+                key=f"title_style_{vid}"
+            )
+            st.checkbox("Pakai angka (3/5/7)", True, key=f"use_num_{vid}")
+            st.checkbox("Pakai brackets [ ]", True, key=f"use_brackets_{vid}")
+            if content_type(v) == "Live":
+                st.text_input("Jadwal/Tema Live (opsional)", "", key=f"timeframe_{vid}")
+
             if st.button("✍️ Buat Judul Alternatif", key=f"btn_titles_{vid}"):
-                cache_set("alt_titles", ai_alt_titles(v))  # mengikuti bahasa judul
+                cache_set("alt_titles", ai_alt_titles(v))  # memakai preferensi + tren VPH
             if cache_get("alt_titles"): st.markdown(cache_get("alt_titles"))
 
             if st.button("🖼️ Buat Ide Thumbnail", key=f"btn_thumb_{vid}"):
