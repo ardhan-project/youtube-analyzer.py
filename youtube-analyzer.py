@@ -35,6 +35,41 @@ if "popup_video" not in st.session_state: st.session_state.popup_video = None
 if "ai_cache" not in st.session_state: st.session_state.ai_cache = {}
 if "keyword_input" not in st.session_state: st.session_state.keyword_input = ""
 
+# ---------------- Helpers: query params (kompatibel) ----------------
+def get_qp():
+    try:
+        qp = getattr(st, "query_params")
+        # st.query_params bisa berupa Mapping (v>=1.31). Normalisasikan ke dict of str.
+        if isinstance(qp, dict):
+            return {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
+        return {}
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            return {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
+        except Exception:
+            return {}
+
+def set_qp(**kwargs):
+    # Bersihkan kunci yang None
+    clean = {k: v for k, v in kwargs.items() if v is not None}
+    try:
+        st.query_params.clear()
+        for k, v in clean.items():
+            st.query_params[k] = v
+    except Exception:
+        try:
+            st.experimental_set_query_params(**clean)
+        except Exception:
+            pass
+
+def clear_open_param():
+    qp = get_qp()
+    if "open" in qp:
+        qp.pop("open", None)
+        set_qp(**qp)
+
+# ---------------- Info Gemini ----------------
 if st.session_state.get("gemini_blocked"):
     st.info("ℹ️ Fitur Gemini dibatasi hari ini (quota tercapai). App pakai fallback lokal.")
 
@@ -114,9 +149,8 @@ def format_jam_utc(publishedAt):
 def asia_jakarta_hour(dt_utc_str: str) -> int | None:
     try:
         dt = datetime.strptime(dt_utc_str,"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        if ZoneInfo:
-            return dt.astimezone(ZoneInfo("Asia/Jakarta")).hour
-        return ((dt.hour + 7) % 24)
+        if ZoneInfo: return dt.astimezone(ZoneInfo("Asia/Jakarta")).hour
+        return (dt.hour + 7) % 24
     except:
         return None
 
@@ -261,8 +295,7 @@ def gemini_generate(prompt: str, retries: int = 1) -> str:
             st.session_state["gemini_blocked"] = True
             st.session_state["gemini_last_error"] = "Batas harian Gemini tercapai. Fallback lokal."
             return ""
-        if retries > 0:
-            return gemini_generate(prompt, retries - 1)
+        if retries > 0: return gemini_generate(prompt, retries - 1)
         st.session_state["gemini_last_error"] = msg
         return ""
 
@@ -275,9 +308,7 @@ def ai_summary(v):
     title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
     res = ""
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
-        res = gemini_generate(
-            f"Ringkas video YouTube berikut menjadi 5 poin bullet berbahasa Indonesia.\nJudul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
-        )
+        res = gemini_generate(f"Ringkas video YouTube berikut menjadi 5 bullet berbahasa Indonesia.\nJudul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}")
     if res: return res
     sentences = re.split(r'(?<=[.!?])\s+', desc)[:5] or [title]
     return "**Ringkasan (fallback lokal)**\n" + "\n".join(f"- {s}" for s in sentences)
@@ -285,37 +316,31 @@ def ai_summary(v):
 def ai_alt_titles(v):
     ct, lang = content_type(v), detect_lang(v["title"])
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
-        if lang == "en":
-            res = gemini_generate(
-                f"Write 10 alternative YouTube titles (≤100 chars) in ENGLISH for '{v['title']}'. Mix styles. Format: {ct}. Numbered list."
-            )
-        else:
-            res = gemini_generate(
-                f"Buat 10 judul alternatif (≤100 karakter) dalam BAHASA INDONESIA untuk '{v['title']}'. Variasikan gaya. Format: {ct}. Daftar bernomor."
-            )
+        res = gemini_generate(
+            (f"Write 10 alternative YouTube titles (≤100 chars) in ENGLISH for '{v['title']}'. " if lang=="en"
+             else f"Buat 10 judul alternatif (≤100 karakter) dalam BAHASA INDONESIA untuk '{v['title']}'. ")
+            + f"Mix styles, keep topic. Content format: {ct}. Numbered list."
+        )
         if res: return res
     base = v["title"]
-    variants = [trim_to_100(base)]
     if lang == "en":
-        variants += [trim_to_100(f"{base} | Full Guide"), trim_to_100(f"{base} (Tips & Tricks)"),
-                     trim_to_100(f"{base}: Step-by-Step"), trim_to_100(f"Master {base} in Minutes"),
-                     trim_to_100(f"{base} for Beginners"), trim_to_100(f"{base} Explained!"),
-                     trim_to_100(f"Top 5 {base} Hacks"), trim_to_100(f"{base} [2025 Update]"),
-                     trim_to_100(f"Why {base}? The Truth")]
+        variants = [trim_to_100(base), trim_to_100(f"{base} | Full Guide"), trim_to_100(f"{base} (Tips & Tricks)"),
+                    trim_to_100(f"{base}: Step-by-Step"), trim_to_100(f"Master {base} in Minutes"),
+                    trim_to_100(f"{base} for Beginners"), trim_to_100(f"{base} Explained!"),
+                    trim_to_100(f"Top 5 {base} Hacks"), trim_to_100(f"{base} [2025 Update]"),
+                    trim_to_100(f"Why {base}? The Truth")]
     else:
-        variants += [trim_to_100(f"{base} | Panduan Lengkap"), trim_to_100(f"{base} (Tips & Trik)"),
-                     trim_to_100(f"{base}: Langkah demi Langkah"), trim_to_100(f"Kuasi {base} dalam Hitungan Menit"),
-                     trim_to_100(f"{base} untuk Pemula"), trim_to_100(f"{base} Tuntas!"),
-                     trim_to_100(f"5 Trik {base} Teratas"), trim_to_100(f"{base} [Update 2025]"),
-                     trim_to_100(f"Kenapa {base}? Ini Alasannya")]
+        variants = [trim_to_100(base), trim_to_100(f"{base} | Panduan Lengkap"), trim_to_100(f"{base} (Tips & Trik)"),
+                    trim_to_100(f"{base}: Langkah demi Langkah"), trim_to_100(f"Kuasi {base} dalam Hitungan Menit"),
+                    trim_to_100(f"{base} untuk Pemula"), trim_to_100(f"{base} Tuntas!"),
+                    trim_to_100(f"5 Trik {base} Teratas"), trim_to_100(f"{base} [Update 2025]"),
+                    trim_to_100(f"Kenapa {base}? Ini Alasannya")]
     return "\n".join(f"{i+1}. {t}" for i, t in enumerate(variants[:10]))
 
 def ai_script_outline(v):
     ct = content_type(v)
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
-        res = gemini_generate(
-            f"Buat kerangka skrip YouTube berbahasa Indonesia untuk '{v['title']}'. Format: {ct}. Sertakan HOOK, Intro, 3–6 poin utama, CTA. Untuk Live tambahkan agenda & interaksi chat."
-        )
+        res = gemini_generate(f"Buat kerangka skrip YouTube berbahasa Indonesia untuk '{v['title']}'. Format: {ct}. Sertakan HOOK, Intro, 3–6 poin utama, CTA. Untuk Live tambahkan agenda & interaksi chat.")
         if res: return res
     return "HOOK → Intro → 3 Bagian → Rekap → CTA" if ct=="Regular" else \
            "HOOK (0–3s) → Inti cepat (3–50s, 3 poin) → CTA (50–60s)" if ct=="Short" else \
@@ -325,9 +350,7 @@ def ai_thumb_ideas(v):
     title = v["title"]
     kw = ", ".join(sorted({w for w in re.split(r"[^\w]+", (title + ' ' + v.get('description','')).lower()) if len(w)>=4 and w not in STOPWORDS})[:8])
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
-        res = gemini_generate(
-            f"Buat 5 ide thumbnail berbahasa Indonesia untuk '{title}'. 1 baris/ide: konsep + gaya + komposisi + teks ≤3 kata. Sertakan 1 prompt (Midjourney-style). Kata kunci: {kw}."
-        )
+        res = gemini_generate(f"Buat 5 ide thumbnail berbahasa Indonesia untuk '{title}'. 1 baris/ide: konsep + gaya + komposisi + teks ≤3 kata. Sertakan 1 prompt (Midjourney-style). Kata kunci: {kw}.")
         if res: return res
     return "\n".join([
         "Close-up objek + teks 2 kata\nPrompt: ultra-detailed close-up, dramatic lighting, high contrast",
@@ -343,10 +366,9 @@ def ai_seo_tags(v):
     fallback = ", ".join(list(dict.fromkeys(words))[:40])[:500]
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
         text = gemini_generate(
-            ("Generate comma-separated YouTube SEO tags in ENGLISH (≤500 chars). "
-             if lang=="en" else
-             "Buat daftar tag SEO YouTube berbahasa INDONESIA (dipisahkan koma, ≤500 karakter). ")
-            + f"Use/ Gunakan kata kunci dari judul & deskripsi.\nTitle/Judul: {title}\nDescription/Deskripsi: {desc[:1500]}"
+            ("Generate comma-separated YouTube SEO tags in ENGLISH (≤500 chars). " if lang=="en"
+             else "Buat daftar tag SEO YouTube berbahasa INDONESIA (dipisahkan koma, ≤500 karakter). ")
+            + f"Use/Gunakan kata kunci dari judul & deskripsi.\nTitle/Judul: {title}\nDescription/Deskripsi: {desc[:1500]}"
         )
         return text if text else fallback
     return fallback
@@ -435,13 +457,13 @@ if submit:
     videos_all = apply_client_sort(videos_all, sort_option, st.session_state.keyword_input)
     st.session_state.last_results = videos_all
 
-    # Auto IDE (ringkas) – fallback lokal kalau kuota habis
+    # Auto IDE singkat – fallback lokal jika quota habis
     st.session_state.auto_ideas = None
     if videos_all and use_gemini() and not st.session_state.get("gemini_blocked", False):
         try:
             top_titles = [v["title"] for v in videos_all[:5]]
             titles_text = "\n".join([f"- {t}" for t in top_titles])
-            kws = []
+            kws=[]
             for t in top_titles:
                 for w in re.split(r"[^\w]+", t.lower()):
                     if len(w) >= 4 and w not in STOPWORDS: kws.append(w)
@@ -481,8 +503,8 @@ st.markdown("""
 .yt-pill.short { background:#1e88e5; }
 .yt-card-a { display:block; color:inherit; text-decoration:none; }
 .yt-card-a:hover .yt-thumb { filter:brightness(1.05); }
-.yt-title a { color:#e6e6e6; font-weight:700; font-size:16px; line-height:1.3; text-decoration:none; display:block; margin-top:8px; }
-.yt-title a:hover { color:#ffffff; text-decoration:underline; }
+.yt-title a, .yt-title button { color:#e6e6e6; font-weight:700; font-size:16px; line-height:1.3; text-decoration:none; display:block; margin-top:8px; background:none; border:none; padding:0; text-align:left; cursor:pointer; }
+.yt-title a:hover, .yt-title button:hover { color:#ffffff; text-decoration:underline; }
 .yt-channel { color:#9aa0a6; font-size:13px; margin:6px 0 2px 0; }
 .yt-meta { color:#9aa0a6; font-size:12px; margin-top:2px; }
 .yt-dot { display:inline-block; width:4px; height:4px; background:#9aa0a6; border-radius:50%; margin:0 6px; vertical-align:middle; }
@@ -558,20 +580,14 @@ if HAS_DIALOG:
         st.markdown("---")
         if st.button("❌ Tutup", key="close_dialog"):
             st.session_state.popup_video = None
-            try: st.query_params.pop("open", None)
-            except Exception: pass
+            clear_open_param()
             st.rerun()
 
 # ---------------- Render results ----------------
 videos_to_show = st.session_state.last_results
 
-# Buka dialog jika ada ?open=<videoId>
-try:
-    qp_val = st.query_params.get("open")
-    open_param = qp_val[0] if isinstance(qp_val, list) else qp_val
-except Exception:
-    open_param = None
-
+# Auto-buka dialog bila ada ?open=<id>
+open_param = get_qp().get("open")
 if open_param and not st.session_state.get("popup_video"):
     for _v in st.session_state.last_results:
         if _v.get("id") == open_param:
@@ -585,12 +601,11 @@ if videos_to_show:
     for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
             vid = v["id"]
-            open_href = f"?open={vid}"
-
-            # ---------- CARD (klik seluruh kartu) ----------
+            href = f"?open={vid}"  # tautan internal → tidak buka tab baru
             pill = '<span class="yt-pill live">LIVE</span>' if v.get("live")=="live" else ('<span class="yt-pill short">SHORT</span>' if v.get("duration_sec",0)<=60 else "")
-            thumb_html = f"""
-<a class="yt-card-a" href="{open_href}" target="_self" rel="nofollow">
+            # KARTU (klik kartu = buka popup via query param)
+            st.markdown(f"""
+<a class="yt-card-a" href="{href}" target="_self" rel="nofollow">
   <div class="yt-card">
     <div class="yt-thumbwrap">
       {pill}
@@ -599,21 +614,25 @@ if videos_to_show:
     </div>
   </div>
 </a>
-"""
-            st.markdown(thumb_html, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-            # Judul (klik judul)
+            # JUDUL (klik judul juga buka popup, tanpa tautan eksternal)
             safe_title = html_lib.escape(v["title"])
-            st.markdown(f'<div class="yt-title"><a class="yt-card-a" href="{open_href}" target="_self" rel="nofollow">{safe_title}</a></div>', unsafe_allow_html=True)
+            # Pakai button bergaya link agar tidak pernah buka tab baru
+            if st.button(safe_title, key=f"title_btn_{vid}"):
+                st.session_state.popup_video = v
+                set_qp(open=vid)
+                if HAS_DIALOG: video_preview_dialog()
+            st.markdown("", unsafe_allow_html=True)
 
             # Channel
             st.markdown(f"<div class='yt-channel'>{html_lib.escape(v['channel'])}</div>", unsafe_allow_html=True)
 
-            # Meta baris 1: views & relatif
+            # Meta: views | relatif
             meta1 = f"{format_views(v['views'])} x ditonton <span class='yt-dot'></span> {format_rel_time(v['publishedAt'])}"
             st.markdown(f"<div class='yt-meta'>{meta1}</div>", unsafe_allow_html=True)
 
-            # Meta baris 2: VPH & jam publish (UTC)
+            # Meta: VPH & jam publish UTC
             meta2 = f"⚡ {v['vph']} VPH <span class='yt-dot'></span> 🕒 {format_jam_utc(v['publishedAt'])}"
             st.markdown(f"<div class='yt-meta'>{meta2}</div>", unsafe_allow_html=True)
 
@@ -654,8 +673,7 @@ if videos_to_show:
         if v.get("channelId"): st.markdown(f"[🌐 Kunjungi Channel YouTube](https://www.youtube.com/channel/{v['channelId']})")
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
-            try: st.query_params.pop("open", None)
-            except Exception: pass
+            clear_open_param()
             st.rerun()
 
     # -------- Tab Ide --------
@@ -704,4 +722,4 @@ if videos_to_show:
             zf.writestr("auto_ideas.txt", ideas_txt_bytes)
         st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
 else:
-    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **kartu/judul** untuk membuka popup.")
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **kartu** atau **judul** untuk membuka popup.")
