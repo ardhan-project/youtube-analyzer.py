@@ -62,7 +62,6 @@ tab1, tab2 = st.tabs(["🔍 Cari Video", "💡 Ide Video"])
 with tab1:
     with st.form("youtube_form"):
         keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation", key="keyword_form_input")
-        # urutan opsi disesuaikan: VPH, Terbaru, Views, Relevan
         sort_option = st.selectbox("Urutkan:", ["VPH Tertinggi", "Terbaru", "Paling Banyak Ditonton", "Paling Relevan"], key="sort_option")
         video_type = st.radio("Tipe Video", ["Semua", "Regular", "Short", "Live"], horizontal=True, key="video_type")
         submit = st.form_submit_button("🔍 Cari Video", key="search_video")
@@ -574,7 +573,7 @@ if submit:
         except Exception:
             st.session_state.auto_ideas = ""
 
-    # Fallback lokal agar tab ide tetap berguna jika kosong/blocked
+    # Fallback lokal
     if (st.session_state.auto_ideas is None) or (st.session_state.auto_ideas.strip() == ""):
         if videos_all:
             sample = videos_all[:5]
@@ -611,17 +610,18 @@ st.markdown("""
 .yt-pill.live { background:#e53935; }
 .yt-pill.short { background:#1e88e5; }
 
-.yt-title > button { background:none !important; border:none !important; padding:0 !important; text-align:left;
-  color:#e6e6e6; font-weight:700; font-size:16px; line-height:1.3; cursor:pointer; }
-.yt-title > button:hover { color:#ffffff; text-decoration:underline; }
+/* Clickable anchor */
+.yt-card-a { display:block; color:inherit; text-decoration:none; }
+.yt-card-a:hover .yt-thumb { filter:brightness(1.05); }
 
+/* Title */
+.yt-title a { color:#e6e6e6; font-weight:700; font-size:16px; line-height:1.3; text-decoration:none; display:block; margin-top:8px; }
+.yt-title a:hover { color:#ffffff; text-decoration:underline; }
+
+/* Channel & meta */
 .yt-channel { color:#9aa0a6; font-size:13px; margin:6px 0 2px 0; }
 .yt-meta { color:#9aa0a6; font-size:12px; margin-top:2px; }
 .yt-dot { display:inline-block; width:4px; height:4px; background:#9aa0a6; border-radius:50%; margin:0 6px; vertical-align:middle; }
-
-/* preview button small */
-.yt-toprow { display:flex; justify-content:flex-end; gap:8px; margin-bottom:6px; }
-.yt-toprow > div > button { padding:2px 8px; font-size:12px; }
 
 .dialog-actions > div > button { width:100%; }
 </style>
@@ -641,7 +641,6 @@ if HAS_DIALOG:
         yt_url = f"https://www.youtube.com/watch?v={vid}"
         ch_url = f"https://www.youtube.com/channel/{v.get('channelId','')}" if v.get("channelId") else None
 
-        # Header: title + chips
         st.markdown(f"### {v['title']}")
         chips = (
             f"<span class='yt-meta'>👁 {format_views(v['views'])}</span> "
@@ -651,7 +650,6 @@ if HAS_DIALOG:
         )
         st.markdown(chips, unsafe_allow_html=True)
 
-        # two columns: video + actions
         c1, c2 = st.columns([2,1])
         with c1:
             st.video(yt_url)
@@ -670,7 +668,6 @@ if HAS_DIALOG:
             else:
                 st.caption("📼 Video reguler")
 
-        # Tabs inside dialog
         t1, t2, t3 = st.tabs(["ℹ️ Info", "✨ Asisten Konten AI", "📈 Analytics"])
         with t1:
             with st.expander("Deskripsi", expanded=False):
@@ -715,57 +712,70 @@ if HAS_DIALOG:
         st.markdown("---")
         if st.button("❌ Tutup", key="close_dialog"):
             st.session_state.popup_video = None
+            # bersihkan query param ?open=
+            try:
+                st.query_params.pop("open", None)
+            except Exception:
+                pass
             st.rerun()
 
 # ---------------- Render results ----------------
 videos_to_show = st.session_state.last_results
+
+# Buka dialog jika ada ?open=<videoId> di URL (klik kartu)
+try:
+    qp_val = st.query_params.get("open")
+    open_param = qp_val[0] if isinstance(qp_val, list) else qp_val
+except Exception:
+    open_param = None
+
+if open_param and not st.session_state.get("popup_video"):
+    for _v in st.session_state.last_results:
+        if _v.get("id") == open_param:
+            st.session_state.popup_video = _v
+            if HAS_DIALOG:
+                video_preview_dialog()
+            break
 
 if videos_to_show:
     cols = st.columns(3)
     all_titles, rows_for_csv = [], []
     for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
-            # --- CARD WRAPPER ---
-            with st.container(border=False):
-                # top row: preview btn
-                tr1, tr2 = st.columns([1, 4])
-                with tr1:
-                    if st.button("🔍 Preview", key=f"preview_btn_{i}"):
-                        st.session_state.popup_video = v
-                        if HAS_DIALOG:
-                            video_preview_dialog()
+            vid = v["id"]
+            open_href = f"?open={vid}"
 
-                # Thumbnail
-                badge_html = ""
-                if v.get("live") == "live": badge_html = '<span class="yt-pill live">LIVE</span>'
-                elif v.get("duration_sec", 0) <= 60: badge_html = '<span class="yt-pill short">SHORT</span>'
-                thumb_html = f"""
-                <div class="yt-card">
-                  <div class="yt-thumbwrap">
-                    {badge_html}
-                    <img class="yt-thumb" src="{v.get('thumbnail','')}" />
-                    <div class="yt-duration-badge">{v.get('duration','-')}</div>
-                  </div>
-                </div>
-                """
-                st.markdown(thumb_html, unsafe_allow_html=True)
+            # Thumbnail card (clickable anchor) + badges
+            badge_html = ""
+            if v.get("live") == "live": badge_html = '<span class="yt-pill live">LIVE</span>'
+            elif v.get("duration_sec", 0) <= 60: badge_html = '<span class="yt-pill short">SHORT</span>'
 
-                # Title (clickable button)
-                st.markdown('<div class="yt-title">', unsafe_allow_html=True)
-                if st.button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview"):
-                    st.session_state.popup_video = v
-                    if HAS_DIALOG: video_preview_dialog()
-                st.markdown('</div>', unsafe_allow_html=True)
+            thumb_html = f"""
+<a class="yt-card-a" href="{open_href}">
+  <div class="yt-card">
+    <div class="yt-thumbwrap">
+      {badge_html}
+      <img class="yt-thumb" src="{v.get('thumbnail','')}" />
+      <div class="yt-duration-badge">{v.get('duration','-')}</div>
+    </div>
+  </div>
+</a>
+"""
+            st.markdown(thumb_html, unsafe_allow_html=True)
 
-                # Channel + META (2 rows)
-                st.markdown(f"<div class='yt-channel'>{v['channel']}</div>", unsafe_allow_html=True)
+            # Title (clickable anchor opens popup)
+            safe_title = html_lib.escape(v["title"])
+            st.markdown(f'<div class="yt-title"><a class="yt-card-a" href="{open_href}">{safe_title}</a></div>', unsafe_allow_html=True)
 
-                meta1 = f"{format_views(v['views'])} x ditonton <span class='yt-dot'></span> {format_rel_time(v['publishedAt'])}"
-                st.markdown(f"<div class='yt-meta'>{meta1}</div>", unsafe_allow_html=True)
+            # Channel + META (2 rows)
+            st.markdown(f"<div class='yt-channel'>{html_lib.escape(v['channel'])}</div>", unsafe_allow_html=True)
 
-                # >>> Tambahan baris kedua: VPH dan jam publish (UTC)
-                meta2 = f"⚡ {v['vph']} VPH <span class='yt-dot'></span> 🕒 {format_jam_utc(v['publishedAt'])}"
-                st.markdown(f"<div class='yt-meta'>{meta2}</div>", unsafe_allow_html=True)
+            meta1 = f"{format_views(v['views'])} x ditonton <span class='yt-dot'></span> {format_rel_time(v['publishedAt'])}"
+            st.markdown(f"<div class='yt-meta'>{meta1}</div>", unsafe_allow_html=True)
+
+            # Baris kedua: VPH & jam publish (UTC)
+            meta2 = f"⚡ {v['vph']} VPH <span class='yt-dot'></span> 🕒 {format_jam_utc(v['publishedAt'])}"
+            st.markdown(f"<div class='yt-meta'>{meta2}</div>", unsafe_allow_html=True)
 
         all_titles.append(v["title"])
         rows_for_csv.append({
@@ -774,7 +784,7 @@ if videos_to_show:
             "Durasi": v.get("duration","-"), "Link": f"https://www.youtube.com/watch?v={v['id']}"
         })
 
-    # -------- Fallback inline detail (jika Streamlit belum mendukung st.dialog) --------
+    # -------- Inline detail (fallback bila Streamlit belum punya st.dialog) --------
     if (not HAS_DIALOG) and st.session_state.popup_video:
         v = st.session_state.popup_video
         vid = v["id"]
@@ -810,6 +820,10 @@ if videos_to_show:
             st.markdown(f"[🌐 Kunjungi Channel YouTube](https://www.youtube.com/channel/{v['channelId']})")
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
+            try:
+                st.query_params.pop("open", None)
+            except Exception:
+                pass
             st.rerun()
 
     # -------- Tab Ide: ringkasan niche + ide --------
@@ -880,4 +894,4 @@ if videos_to_show:
             zf.writestr("auto_ideas.txt", ideas_txt_bytes)
         st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
 else:
-    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **🔍 Preview** atau **judul** untuk membuka popup.")
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **kartu/judul** untuk membuka popup.")
