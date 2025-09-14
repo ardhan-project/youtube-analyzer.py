@@ -12,6 +12,7 @@ try:
 except Exception:
     ZoneInfo = None
 from collections import Counter
+from streamlit.components.v1 import html as st_html
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -39,7 +40,6 @@ if "keyword_input" not in st.session_state: st.session_state.keyword_input = ""
 def get_qp():
     try:
         qp = getattr(st, "query_params")
-        # st.query_params bisa berupa Mapping (v>=1.31). Normalisasikan ke dict of str.
         if isinstance(qp, dict):
             return {k: (v[0] if isinstance(v, list) else v) for k, v in qp.items()}
         return {}
@@ -51,7 +51,6 @@ def get_qp():
             return {}
 
 def set_qp(**kwargs):
-    # Bersihkan kunci yang None
     clean = {k: v for k, v in kwargs.items() if v is not None}
     try:
         st.query_params.clear()
@@ -457,7 +456,6 @@ if submit:
     videos_all = apply_client_sort(videos_all, sort_option, st.session_state.keyword_input)
     st.session_state.last_results = videos_all
 
-    # Auto IDE singkat – fallback lokal jika quota habis
     st.session_state.auto_ideas = None
     if videos_all and use_gemini() and not st.session_state.get("gemini_blocked", False):
         try:
@@ -490,25 +488,14 @@ if submit:
             kws = ", ".join(sorted(set(kws))[:10])
             st.session_state.auto_ideas = f"**Format dominan:** {fmt_dom}\n\n**Kata kunci turunan:** {kws}\n\n(aktifkan Gemini untuk ide lengkap)."
 
-# ---------------- CSS ----------------
+# ---------------- CSS global ----------------
 st.markdown("""
 <style>
-.yt-card { background:#111418; border-radius:12px; overflow:hidden; box-shadow:0 1px 2px rgba(0,0,0,.25); }
-.yt-thumbwrap { position:relative; }
-.yt-thumb { width:100%; display:block; aspect-ratio:16/9; object-fit:cover; }
-.yt-duration-badge { position:absolute; right:8px; bottom:8px; background:rgba(0,0,0,.85); color:#fff; font-size:12px;
-  padding:2px 6px; border-radius:6px; }
-.yt-pill { position:absolute; left:8px; top:8px; font-weight:700; font-size:12px; padding:2px 8px; border-radius:999px; color:#fff; }
-.yt-pill.live { background:#e53935; }
-.yt-pill.short { background:#1e88e5; }
-.yt-card-a { display:block; color:inherit; text-decoration:none; }
-.yt-card-a:hover .yt-thumb { filter:brightness(1.05); }
 .yt-title a, .yt-title button { color:#e6e6e6; font-weight:700; font-size:16px; line-height:1.3; text-decoration:none; display:block; margin-top:8px; background:none; border:none; padding:0; text-align:left; cursor:pointer; }
 .yt-title a:hover, .yt-title button:hover { color:#ffffff; text-decoration:underline; }
 .yt-channel { color:#9aa0a6; font-size:13px; margin:6px 0 2px 0; }
 .yt-meta { color:#9aa0a6; font-size:12px; margin-top:2px; }
 .yt-dot { display:inline-block; width:4px; height:4px; background:#9aa0a6; border-radius:50%; margin:0 6px; vertical-align:middle; }
-.dialog-actions > div > button { width:100%; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -519,7 +506,7 @@ if HAS_DIALOG:
     @st.dialog("📺 Video Preview")
     def video_preview_dialog():
         v = st.session_state.get("popup_video")
-        if not v: 
+        if not v:
             st.write("Tidak ada video.")
             return
         vid = v["id"]
@@ -595,44 +582,62 @@ if open_param and not st.session_state.get("popup_video"):
             if HAS_DIALOG: video_preview_dialog()
             break
 
+def render_card_iframe(v):
+    """Thumbnail/card pakai iframe HTML (aman, tidak dibaca sebagai teks)."""
+    vid = v["id"]
+    thumb = v.get("thumbnail","")
+    duration = v.get("duration","-")
+    pill = ""
+    if v.get("live") == "live":
+        pill = '<span class="pill live">LIVE</span>'
+    elif v.get("duration_sec",0) <= 60:
+        pill = '<span class="pill short">SHORT</span>'
+    html = f"""
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  body {{ margin:0; background:transparent; }}
+  .card {{ position:relative; display:block; width:100%; border-radius:12px; overflow:hidden; background:#111418; }}
+  .thumb {{ width:100%; aspect-ratio:16/9; object-fit:cover; display:block; }}
+  .dur {{ position:absolute; right:8px; bottom:8px; background:rgba(0,0,0,.85); color:#fff; font-size:12px; padding:2px 6px; border-radius:6px; }}
+  .pill {{ position:absolute; left:8px; top:8px; font-weight:700; font-size:12px; padding:2px 8px; border-radius:999px; color:#fff; }}
+  .pill.live {{ background:#e53935; }}
+  .pill.short {{ background:#1e88e5; }}
+  a {{ text-decoration:none; }}
+</style></head>
+<body>
+  <a href="?open={vid}" target="_top" class="card" title="Preview">
+    {pill}
+    <img class="thumb" src="{thumb}">
+    <span class="dur">{duration}</span>
+  </a>
+</body></html>
+"""
+    # tinggi 210px cukup untuk 16:9 di kebanyakan grid; tidak bikin scroll
+    st_html(html, height=210, scrolling=False)
+
 if videos_to_show:
     cols = st.columns(3)
     all_titles, rows_for_csv = [], []
     for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
-            vid = v["id"]
-            href = f"?open={vid}"  # tautan internal → tidak buka tab baru
-            pill = '<span class="yt-pill live">LIVE</span>' if v.get("live")=="live" else ('<span class="yt-pill short">SHORT</span>' if v.get("duration_sec",0)<=60 else "")
-            # KARTU (klik kartu = buka popup via query param)
-            st.markdown(f"""
-<a class="yt-card-a" href="{href}" target="_self" rel="nofollow">
-  <div class="yt-card">
-    <div class="yt-thumbwrap">
-      {pill}
-      <img class="yt-thumb" src="{v.get('thumbnail','')}" />
-      <div class="yt-duration-badge">{v.get('duration','-')}</div>
-    </div>
-  </div>
-</a>
-""", unsafe_allow_html=True)
+            # Thumbnail card (klik = popup)
+            render_card_iframe(v)
 
-            # JUDUL (klik judul juga buka popup, tanpa tautan eksternal)
+            # Judul (klik = popup, tidak buka tab)
             safe_title = html_lib.escape(v["title"])
-            # Pakai button bergaya link agar tidak pernah buka tab baru
-            if st.button(safe_title, key=f"title_btn_{vid}"):
+            if st.button(safe_title, key=f"title_btn_{v['id']}"):
                 st.session_state.popup_video = v
-                set_qp(open=vid)
+                set_qp(open=v["id"])
                 if HAS_DIALOG: video_preview_dialog()
-            st.markdown("", unsafe_allow_html=True)
 
             # Channel
             st.markdown(f"<div class='yt-channel'>{html_lib.escape(v['channel'])}</div>", unsafe_allow_html=True)
 
-            # Meta: views | relatif
+            # Meta 1
             meta1 = f"{format_views(v['views'])} x ditonton <span class='yt-dot'></span> {format_rel_time(v['publishedAt'])}"
             st.markdown(f"<div class='yt-meta'>{meta1}</div>", unsafe_allow_html=True)
 
-            # Meta: VPH & jam publish UTC
+            # Meta 2 (VPH & jam publish)
             meta2 = f"⚡ {v['vph']} VPH <span class='yt-dot'></span> 🕒 {format_jam_utc(v['publishedAt'])}"
             st.markdown(f"<div class='yt-meta'>{meta2}</div>", unsafe_allow_html=True)
 
