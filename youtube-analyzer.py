@@ -239,7 +239,6 @@ def ai_summary(v):
             f"Ringkas video YouTube berikut menjadi 5 poin bullet berbahasa Indonesia, fokus manfaat untuk penonton, hindari klaim berlebihan.\n"
             f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
         )
-    # fallback Indonesia
     sentences = re.split(r'(?<=[.!?])\s+', desc)[:5]
     if not sentences: sentences = [title]
     bullets = "\n".join(f"- {s}" for s in sentences)
@@ -247,7 +246,7 @@ def ai_summary(v):
 
 def ai_alt_titles(v):
     ct = content_type(v)
-    lang = detect_lang(v["title"])  # ← mengikuti bahasa judul
+    lang = detect_lang(v["title"])  # mengikuti bahasa judul
     if use_gemini():
         if lang == "en":
             return gemini_generate(
@@ -261,7 +260,6 @@ def ai_alt_titles(v):
                 f"Sesuai topik asli. Variasikan gaya (angka, kurung, pertanyaan). "
                 f"Format konten: {ct}. Tulis sebagai daftar bernomor."
             )
-    # fallback bilingual sederhana
     base = v["title"]
     if lang == "en":
         variants = [
@@ -299,7 +297,6 @@ def ai_script_outline(v):
             f"Format: {ct}. Sertakan: HOOK, Intro, 3–6 bagian utama, CTA. "
             f"Untuk Short ≤60 detik; untuk Live tambahkan segmen (pembuka, agenda, interaksi chat, checkpoint, closing)."
         )
-    # fallback Indonesia
     if ct == "Short":
         return "HOOK (0-3s) → INTI cepat (3-50s, 3 poin) → CTA (50-60s)"
     if ct == "Live":
@@ -315,7 +312,6 @@ def ai_thumb_ideas(v):
             f"Buat 5 ide thumbnail berbahasa Indonesia untuk '{title}'. Setiap ide 1 baris: konsep + gaya + komposisi + teks ≤3 kata. "
             f"Sertakan 1 prompt generatif per ide (gaya Midjourney). Kata kunci: {kw}."
         )
-    # fallback Indonesia
     ideas = [
         f"Close-up objek utama + teks 2 kata\nPrompt: ultra-detailed close-up, dramatic lighting, high contrast, bold 2-word overlay",
         f"Before/After split screen\nPrompt: split-screen comparison, left dull, right vibrant, cinematic, 16:9, bold arrow",
@@ -328,7 +324,7 @@ def ai_thumb_ideas(v):
 def ai_seo_tags(v):
     title = v["title"]
     desc = v.get("description","")
-    lang = detect_lang(title)  # ← mengikuti bahasa judul
+    lang = detect_lang(title)  # mengikuti bahasa judul
     base_text = (title + " " + desc).lower()
     words = [w for w in re.split(r"[^\w]+", base_text) if len(w)>=3 and w not in STOPWORDS]
     uniq = list(dict.fromkeys(words))[:40]
@@ -467,13 +463,13 @@ if videos_to_show:
             if cache_get("script"): st.markdown(cache_get("script"))
 
             if st.button("🔑 Buat Tag SEO", key=f"btn_tags_{vid}"):
-                cache_set("tags", ai_seo_tags(v))
+                cache_set("tags", ai_seo_tags(v))  # mengikuti bahasa judul
             if cache_get("tags"):
                 st.text_area("Tag SEO", cache_get("tags"), height=120, key=f"tags_area_{vid}")
 
         with c2:
             if st.button("✍️ Buat Judul Alternatif", key=f"btn_titles_{vid}"):
-                cache_set("alt_titles", ai_alt_titles(v))
+                cache_set("alt_titles", ai_alt_titles(v))  # mengikuti bahasa judul
             if cache_get("alt_titles"): st.markdown(cache_get("alt_titles"))
 
             if st.button("🖼️ Buat Ide Thumbnail", key=f"btn_thumb_{vid}"):
@@ -485,13 +481,9 @@ if videos_to_show:
 
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
-            # optional: bersihkan query param jika sebelumnya dipakai
-            if "open" in st.query_params:
-                try: del st.query_params["open"]
-                except Exception: pass
             st.rerun()
 
-    # -------- Rekomendasi Judul & Tag --------
+    # -------- Rekomendasi Judul --------
     st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
     rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "Paling Relevan"))
     for idx, rt in enumerate(rec_titles, 1):
@@ -503,18 +495,33 @@ if videos_to_show:
         st.success(f"Judul tersalin: {st.session_state['copied']}")
         st.session_state.pop("copied")
 
+    # -------- Rekomendasi Tag (mengikuti bahasa judul jika preview terbuka) --------
     st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
-    uniq_words, seen = [], set()
-    for t in all_titles:
-        for w in re.split(r"[^\w]+", t.lower()):
-            if len(w) >= 3 and w not in STOPWORDS and w not in seen:
-                uniq_words.append(w); seen.add(w)
-    tag_string = ", ".join(uniq_words)
-    if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
+
+    if st.session_state.popup_video:
+        vprev = st.session_state.popup_video
+        preview_tags = ai_seo_tags(vprev)  # bilingual mengikuti bahasa judul
+        st.text_area("Tag (berdasarkan video yang dipreview)", preview_tags[:500], height=120, key=f"tag_area_preview_{vprev['id']}")
+    else:
+        uniq_words, seen = [], set()
+        for t in all_titles:
+            for w in re.split(r"[^\w]+", t.lower()):
+                if len(w) >= 3 and w not in STOPWORDS and w not in seen:
+                    uniq_words.append(w); seen.add(w)
+        tag_string = ", ".join(uniq_words)
+        if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
+        st.text_area("Tag (gabungan hasil pencarian)", tag_string, height=100, key="tag_area_global")
 
     col1, col2 = st.columns([8, 1])
-    with col1: st.text_area("Tag", tag_string, height=100, key="tag_area")
-    with col2: st.button("📋", key="copy_tag", on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
+    with col2:
+        def _copy_current_tags():
+            if st.session_state.popup_video:
+                vprev = st.session_state.popup_video
+                st.session_state["copied_tag"] = st.session_state.get(f"tag_area_preview_{vprev['id']}", "")
+            else:
+                st.session_state["copied_tag"] = st.session_state.get("tag_area_global", "")
+        st.button("📋", key="copy_tag_btn", on_click=_copy_current_tags)
+
     if "copied_tag" in st.session_state:
         st.success("✅ Tag tersalin!")
         st.session_state.pop("copied_tag")
