@@ -215,9 +215,16 @@ if submit:
             with cols[i % 3]:
                 # Thumbnail klik → popup
                 if v["thumbnail"]:
-                    if st.button(" ", key=f"thumb_btn_{i}"):
+                    if st.button(f"thumb_{i}", key=f"thumb_btn_{i}"):
                         st.session_state["popup_video"] = v
-                    st.image(v["thumbnail"], use_column_width=True)
+                    st.markdown(
+                        f"""
+                        <div style="cursor:pointer;" onclick="window.parent.postMessage({{'setVideo':'{v['id']}' }}, '*')">
+                            <img src="{v['thumbnail']}" style="width:100%;border-radius:10px;">
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
                 # Judul klik → popup
                 if st.button(v["title"], key=f"title_btn_{i}"):
