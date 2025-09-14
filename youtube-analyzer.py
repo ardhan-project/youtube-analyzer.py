@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import re
 import io
 import zipfile
-import html as html_lib  # escape judul/deskripsi
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -17,18 +16,14 @@ a an and the for of to in on with from by at as or & | - live official lyrics ly
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
-# ================== Sidebar ==================
-if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
-if "gemini_api" not in st.session_state:
-    st.session_state.gemini_api = ""
-if "auto_ideas" not in st.session_state:
-    st.session_state.auto_ideas = None
-if "last_results" not in st.session_state:
-    st.session_state.last_results = []
-if "popup_video" not in st.session_state:
-    st.session_state.popup_video = None
+# ---------------- Session init ----------------
+if "api_key" not in st.session_state: st.session_state.api_key = ""
+if "gemini_api" not in st.session_state: st.session_state.gemini_api = ""
+if "auto_ideas" not in st.session_state: st.session_state.auto_ideas = None
+if "last_results" not in st.session_state: st.session_state.last_results = []
+if "popup_video" not in st.session_state: st.session_state.popup_video = None
 
+# ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     api_key = st.text_input("YouTube Data API Key", st.session_state.api_key, type="password", key="yt_api_key")
@@ -44,7 +39,7 @@ if not st.session_state.api_key:
     st.warning("⚠️ Masukkan API Key di sidebar untuk mulai")
     st.stop()
 
-# ================== Tabs ==================
+# ---------------- Tabs ----------------
 tab1, tab2 = st.tabs(["🔍 Cari Video", "💡 Ide Video"])
 
 with tab1:
@@ -61,7 +56,7 @@ with tab2:
     else:
         st.info("⚠️ Belum ada ide. Silakan cari video dulu di tab 🔍.")
 
-# ================== Utils ==================
+# ---------------- Utils ----------------
 def iso8601_to_seconds(duration: str) -> int:
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration or "")
     if not m: return 0
@@ -104,7 +99,7 @@ def format_jam_utc(publishedAt):
         return dt.strftime("%Y-%m-%d %H:%M UTC")
     except: return "-"
 
-# ================== API ==================
+# ---------------- API ----------------
 def yt_search_ids(api_key, query, order, max_results):
     params = {"part":"snippet","q":query,"type":"video","order":order,"maxResults":max_results,"key":api_key}
     r = requests.get(SEARCH_URL, params=params).json()
@@ -141,7 +136,7 @@ def get_trending(api_key, max_results=15):
     r = requests.get(VIDEOS_URL, params=params).json()
     return yt_videos_detail(api_key, [it["id"] for it in r.get("items",[])])
 
-# ================== Sort & Filter ==================
+# ---------------- Sort & Filter ----------------
 def map_sort_option(sort_option: str):
     if sort_option == "Paling Banyak Ditonton": return "viewCount"
     if sort_option == "Terbaru": return "date"
@@ -166,7 +161,7 @@ def filter_by_video_type(items, video_type_label: str):
         return [v for v in items if v.get("live", "none") == "live"]
     return items
 
-# ================== Judul Generator ==================
+# ---------------- Judul Generator ----------------
 def trim_to_100(text):
     if len(text) <= 100: return text
     trimmed = text[:100]
@@ -196,7 +191,7 @@ def generate_titles_from_data(videos, sort_option):
     rekomendasi.append(trim_to_100(gabungan))
     return [trim_to_100(t) for t in rekomendasi[:10]]
 
-# ================== Handle submit (update state) ==================
+# ---------------- Handle submit: fetch & store ----------------
 if submit:
     if not keyword.strip():
         st.info("📈 Menampilkan trending (default US)")
@@ -209,9 +204,9 @@ if submit:
 
     videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
-    st.session_state.last_results = videos_all  # persist
+    st.session_state.last_results = videos_all
 
-    # Generate ide otomatis (opsional)
+    # (Opsional) generate ide Gemini
     st.session_state.auto_ideas = None
     if videos_all and st.session_state.gemini_api:
         try:
@@ -229,19 +224,15 @@ if submit:
             short_count = sum(1 for v in videos_all if v.get("duration_sec", 0) <= 60)
             live_count = sum(1 for v in videos_all if v.get("live", "none") == "live")
             regular_count = len(videos_all) - short_count - live_count
-            if short_count > max(live_count, regular_count):
-                video_format = "Short (≤60 detik)"
-            elif live_count > max(short_count, regular_count):
-                video_format = "Live Streaming"
-            else:
-                video_format = "Video Reguler (5–30 menit)"
+            if short_count > max(live_count, regular_count): fmt = "Short (≤60 detik)"
+            elif live_count > max(short_count, regular_count): fmt = "Live Streaming"
+            else: fmt = "Video Reguler (5–30 menit)"
             prompt = f"""
-Berdasarkan hasil pencarian video YouTube berikut:
-
+Berdasarkan hasil pencarian video YouTube:
 {titles_text}
 
 Kata kunci turunan: {derived_kw}
-Jenis konten dominan: {video_format}
+Jenis konten dominan: {fmt}
 
 Buatkan 5 ide konten video baru yang relevan.
 """
@@ -250,63 +241,43 @@ Buatkan 5 ide konten video baru yang relevan.
         except Exception as e:
             st.session_state.auto_ideas = f"❌ Error Gemini: {e}"
 
-# ================== Render results from state (selalu jalan) ==================
+# ---------------- Render results from state ----------------
 videos_to_show = st.session_state.last_results
 
-# Baca query param open via API baru
-open_param = st.query_params.get("open", None)
-if open_param and videos_to_show:
-    chosen = next((v for v in videos_to_show if v["id"] == open_param), None)
-    if chosen:
-        st.session_state.popup_video = chosen
+# CSS agar tombol judul tampak seperti link
+st.markdown("""
+<style>
+.linklike > button { 
+  background:none !important; border:none !important; padding:0 !important; 
+  color:#1f6feb; text-decoration:none; font-weight:600; cursor:pointer;
+}
+.linklike > button:hover { text-decoration:underline; }
+.badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px;
+         border-radius:4px; font-weight:700; }
+.badge-live { background:#e53935; }
+.badge-short{ background:#1e88e5; }
+.thumbwrap { position:relative; }
+img.thumb { width:100%; border-radius:10px; display:block; }
+</style>
+""", unsafe_allow_html=True)
 
 if videos_to_show:
     cols = st.columns(3)
     all_titles, rows_for_csv = [], []
-
-    # CSS kecil
-    st.markdown("""
-    <style>
-    a.title-link { text-decoration:none; font-weight:600; display:block; margin-top:6px; }
-    a.title-link:hover { text-decoration:underline; }
-    .thumb-wrap { position:relative; display:block; cursor:pointer; }
-    .badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px;
-             border-radius:4px; font-weight:700; }
-    .badge-live { background:#e53935; }
-    .badge-short{ background:#1e88e5; }
-    img.thumb { width:100%; border-radius:10px; display:block; }
-    </style>
-    """, unsafe_allow_html=True)
-
     for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
-            # Badge
+            # Thumbnail (display only)
             badge_html = ""
-            if v.get("live") == "live":
-                badge_html = '<div class="badge badge-live">LIVE</div>'
-            elif v.get("duration_sec", 0) <= 60:
-                badge_html = '<div class="badge badge-short">SHORT</div>'
-
-            # Thumbnail (klik → set query param melalui JS; tidak buka tab baru)
+            if v.get("live") == "live": badge_html = '<div class="badge badge-live">LIVE</div>'
+            elif v.get("duration_sec", 0) <= 60: badge_html = '<div class="badge badge-short">SHORT</div>'
             if v.get("thumbnail"):
-                st.markdown(
-                    f"""<div class="thumb-wrap" onclick="window.parent.location.search='?open={v["id"]}'">
-                           {badge_html}
-                           <img class="thumb" src="{v["thumbnail"]}">
-                        </div>""",
-                    unsafe_allow_html=True
-                )
+                st.markdown(f'<div class="thumbwrap">{badge_html}<img class="thumb" src="{v["thumbnail"]}"></div>', unsafe_allow_html=True)
 
-            # Judul (klik → set query param; tidak buka tab baru)
-            safe_title = html_lib.escape(v["title"])
-            st.markdown(
-                f"""<a class="title-link" href="javascript:void(0)" 
-                      onclick="window.parent.location.search='?open={v["id"]}'">{safe_title}</a>""",
-                unsafe_allow_html=True
-            )
+            # Title as link-like button (this triggers popup without navigation)
+            if st.container().button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview", type="secondary"):
+                st.session_state.popup_video = v
 
             st.caption(v["channel"])
-
             c1, c2, c3 = st.columns(3)
             with c1: st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;'>👁 {format_views(v['views'])}</div>", unsafe_allow_html=True)
             with c2: st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;'>⚡ {v['vph']}</div>", unsafe_allow_html=True)
@@ -315,17 +286,12 @@ if videos_to_show:
 
         all_titles.append(v["title"])
         rows_for_csv.append({
-            "Judul": v["title"],
-            "Channel": v["channel"],
-            "Views": v["views"],
-            "VPH": v["vph"],
-            "Tanggal (relatif)": format_rel_time(v["publishedAt"]),
-            "Jam Publish (UTC)": format_jam_utc(v["publishedAt"]),
-            "Durasi": v.get("duration","-"),
-            "Link": f"https://www.youtube.com/watch?v={v['id']}"
+            "Judul": v["title"], "Channel": v["channel"], "Views": v["views"], "VPH": v["vph"],
+            "Tanggal (relatif)": format_rel_time(v["publishedAt"]), "Jam Publish (UTC)": format_jam_utc(v["publishedAt"]),
+            "Durasi": v.get("duration","-"), "Link": f"https://www.youtube.com/watch?v={v['id']}"
         })
 
-    # ===== Popup Video Detail =====
+    # Popup detail (no navigation)
     if st.session_state.popup_video:
         v = st.session_state.popup_video
         st.markdown("---")
@@ -349,12 +315,14 @@ if videos_to_show:
 
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
-            # Hapus query param open dengan API baru
-            if "open" in st.query_params:
-                del st.query_params["open"]
+            if "open" in st.query_params:  # API baru
+                try:
+                    del st.query_params["open"]
+                except Exception:
+                    pass
             st.rerun()
 
-    # ===== Rekomendasi Judul =====
+    # Titles suggestion
     st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
     rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "Paling Relevan"))
     for idx, rt in enumerate(rec_titles, 1):
@@ -366,7 +334,7 @@ if videos_to_show:
         st.success(f"Judul tersalin: {st.session_state['copied']}")
         st.session_state.pop("copied")
 
-    # ===== Rekomendasi Tag =====
+    # Tags suggestion
     st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
     uniq_words, seen = [], set()
     for t in all_titles:
@@ -375,7 +343,6 @@ if videos_to_show:
                 uniq_words.append(w); seen.add(w)
     tag_string = ", ".join(uniq_words)
     if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
-
     col1, col2 = st.columns([8, 1])
     with col1: st.text_area("Tag", tag_string, height=100, key="tag_area")
     with col2: st.button("📋", key="copy_tag", on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
@@ -383,20 +350,18 @@ if videos_to_show:
         st.success("✅ Tag tersalin!")
         st.session_state.pop("copied_tag")
 
-    # ===== Download Data =====
+    # Downloads
     st.subheader("⬇️ Download Data")
     df = pd.DataFrame(rows_for_csv)
     csv_video_bytes = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV (Video)", csv_video_bytes, "youtube_riset.csv", "text/csv", key="dl_csv")
-
     if st.session_state.auto_ideas:
         ideas_txt_bytes = st.session_state.auto_ideas.encode("utf-8")
         st.download_button("Download Ide (TXT)", ideas_txt_bytes, "auto_ideas.txt", "text/plain", key="dl_txt")
-
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("youtube_riset.csv", csv_video_bytes)
             zf.writestr("auto_ideas.txt", ideas_txt_bytes)
         st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
 else:
-    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik thumbnail/judul untuk membuka preview.")
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik judul untuk membuka preview.")
