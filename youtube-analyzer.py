@@ -3,6 +3,8 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 import re
+import io
+import zipfile
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -19,6 +21,8 @@ if "api_key" not in st.session_state:
     st.session_state.api_key = ""
 if "gemini_api" not in st.session_state:
     st.session_state.gemini_api = ""
+if "auto_ideas" not in st.session_state:
+    st.session_state.auto_ideas = None
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -47,8 +51,8 @@ with tab1:
 
 with tab2:
     st.subheader("💡 Rekomendasi Ide Video (otomatis dari hasil pencarian)")
-    if "auto_ideas" in st.session_state:
-        st.markdown(st.session_state["auto_ideas"])
+    if st.session_state.auto_ideas:
+        st.markdown(st.session_state.auto_ideas)
     else:
         st.info("⚠️ Belum ada ide. Silakan cari video dulu di tab 🔍.")
 
@@ -196,11 +200,13 @@ if submit:
         ids = yt_search_ids(st.session_state.api_key, keyword, order, max_per_order)
         videos_all = yt_videos_detail(st.session_state.api_key, ids)
 
+    # Filter & sort
     videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
     st.session_state["last_results"] = videos_all
 
     # ====== Generate ide otomatis dengan Gemini ======
+    st.session_state.auto_ideas = None  # reset dulu
     if videos_all and st.session_state.gemini_api:
         try:
             import google.generativeai as genai
@@ -265,11 +271,11 @@ Untuk setiap ide gunakan format:
   misalnya untuk AI image generator (Midjourney, Leonardo).
 """
             resp = model.generate_content(prompt)
-            st.session_state["auto_ideas"] = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
+            st.session_state.auto_ideas = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
         except Exception as e:
-            st.session_state["auto_ideas"] = f"❌ Error Gemini: {e}"
+            st.session_state.auto_ideas = f"❌ Error Gemini: {e}"
 
-    # ======= Tampilkan hasil video + judul/tag/CSV (tetap seperti sebelumnya) =======
+    # ======= Tampilkan hasil video + judul/tag/CSV =======
     if not videos_all:
         st.error("❌ Tidak ada video ditemukan")
     else:
@@ -277,26 +283,53 @@ Untuk setiap ide gunakan format:
         all_titles, rows_for_csv = [], []
         for i, v in enumerate(videos_all):
             with cols[i % 3]:
+                # Badge kiri atas
                 badge = ""
                 if v["live"] == "live":
                     badge = "<div style='position:absolute;top:6px;left:6px;background:#e53935;color:white;padding:2px 6px;font-size:12px;border-radius:4px;font-weight:600;'>LIVE</div>"
                 elif v.get("duration_sec", 0) <= 60:
                     badge = "<div style='position:absolute;top:6px;left:6px;background:#1e88e5;color:white;padding:2px 6px;font-size:12px;border-radius:4px;font-weight:600;'>SHORT</div>"
                 if v["thumbnail"]:
-                    st.markdown(f"<div style='position:relative;display:inline-block;width:100%;'>{badge}<img src='{v['thumbnail']}' style='width:100%;border-radius:10px;display:block;'></div>", unsafe_allow_html=True)
+                    st.markdown(
+                        f"<div style='position:relative;display:inline-block;width:100%;'>"
+                        f"{badge}"
+                        f"<img src='{v['thumbnail']}' style='width:100%;border-radius:10px;display:block;'>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+
                 st.markdown(f"**[{v['title']}]({'https://www.youtube.com/watch?v='+v['id']})**")
                 st.caption(v["channel"])
+
+                # Chips info
                 c1, c2, c3 = st.columns(3)
-                with c1: st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>👁 {format_views(v['views'])} views</div>", unsafe_allow_html=True)
-                with c2: st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⚡ {v['vph']} VPH</div>", unsafe_allow_html=True)
-                with c3: st.markdown(f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⏱ {format_rel_time(v['publishedAt'])}</div>", unsafe_allow_html=True)
+                with c1:
+                    st.markdown(
+                        f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>👁 {format_views(v['views'])} views</div>",
+                        unsafe_allow_html=True
+                    )
+                with c2:
+                    st.markdown(
+                        f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⚡ {v['vph']} VPH</div>",
+                        unsafe_allow_html=True
+                    )
+                with c3:
+                    st.markdown(
+                        f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⏱ {format_rel_time(v['publishedAt'])}</div>",
+                        unsafe_allow_html=True
+                    )
                 st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
+
             all_titles.append(v["title"])
             rows_for_csv.append({
-                "Judul": v["title"], "Channel": v["channel"], "Views": v["views"],
-                "VPH": v["vph"], "Tanggal": format_rel_time(v["publishedAt"]),
+                "Judul": v["title"],
+                "Channel": v["channel"],
+                "Views": v["views"],
+                "VPH": v["vph"],
+                "Tanggal (relatif)": format_rel_time(v["publishedAt"]),
                 "Jam Publish (UTC)": format_jam_utc(v["publishedAt"]),
-                "Durasi": v.get("duration","-"), "Link": f"https://www.youtube.com/watch?v={v['id']}"
+                "Durasi": v.get("duration","-"),
+                "Link": f"https://www.youtube.com/watch?v={v['id']}"
             })
 
         # ===== Rekomendasi Judul =====
@@ -322,5 +355,36 @@ Untuk setiap ide gunakan format:
                 if len(w) >= 3 and w not in STOPWORDS and w not in seen:
                     uniq_words.append(w); seen.add(w)
         tag_string = ", ".join(uniq_words)
-        if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
-        col1, col2 = st
+        if len(tag_string) > 500:
+            tag_string = tag_string[:497] + "..."
+
+        col1, col2 = st.columns([8, 1])
+        with col1:
+            st.text_area("Tag", tag_string, height=100)
+        with col2:
+            st.button("📋", key="copy_tag", help="Salin tag",
+                      on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
+
+        if "copied_tag" in st.session_state:
+            st.success("✅ Tag tersalin!")
+            st.session_state.pop("copied_tag")
+
+        # ===== Download Data =====
+        st.subheader("⬇️ Download Data")
+
+        # CSV Video
+        df = pd.DataFrame(rows_for_csv)
+        csv_video_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV (Video)", csv_video_bytes, "youtube_riset.csv", "text/csv")
+
+        # TXT Ideas (jika ada)
+        if st.session_state.auto_ideas:
+            ideas_txt_bytes = st.session_state.auto_ideas.encode("utf-8")
+            st.download_button("Download Ide (TXT)", ideas_txt_bytes, "auto_ideas.txt", "text/plain")
+
+            # Paket ZIP: csv + txt
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("youtube_riset.csv", csv_video_bytes)
+                zf.writestr("auto_ideas.txt", ideas_txt_bytes)
+            st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip")
