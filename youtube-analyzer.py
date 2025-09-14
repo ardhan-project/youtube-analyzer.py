@@ -230,35 +230,29 @@ def content_type(v):
     if v.get("duration_sec", 0) <= 60: return "Short"
     return "Regular"
 
-# ---------------- AI tasks (bilingual) ----------------
+# ---------------- AI tasks ----------------
+# NOTE: Hanya ALT TITLES & SEO TAGS yang bilingual (ID/EN). Lainnya selalu bahasa Indonesia.
 def ai_summary(v):
     title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
-    lang = detect_lang(title)
     if use_gemini():
-        if lang == "en":
-            return gemini_generate(
-                f"Summarize the YouTube video based on title/description below into 5 concise bullets for viewers (English):\n"
-                f"Title: {title}\nChannel: {ch}\nDescription:\n{desc[:3000]}"
-            )
-        else:
-            return gemini_generate(
-                f"Ringkas video YouTube berdasarkan judul/deskripsi berikut menjadi 5 poin singkat untuk penonton (Bahasa Indonesia):\n"
-                f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
-            )
-    # fallback ringkasan sederhana
+        return gemini_generate(
+            f"Ringkas video YouTube berikut menjadi 5 poin bullet berbahasa Indonesia, fokus manfaat untuk penonton, hindari klaim berlebihan.\n"
+            f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
+        )
+    # fallback Indonesia
     sentences = re.split(r'(?<=[.!?])\s+', desc)[:5]
     if not sentences: sentences = [title]
     bullets = "\n".join(f"- {s}" for s in sentences)
-    return ("**Summary (heuristic)**\n" if lang=="en" else "**Ringkasan (heuristik)**\n") + bullets
+    return f"**Ringkasan (heuristik)**\n{bullets}"
 
 def ai_alt_titles(v):
     ct = content_type(v)
-    lang = detect_lang(v["title"])
+    lang = detect_lang(v["title"])  # ← mengikuti bahasa judul
     if use_gemini():
         if lang == "en":
             return gemini_generate(
                 f"Write 10 alternative YouTube titles (≤100 chars) in ENGLISH for the video '{v['title']}'. "
-                f"Keep the same topic. Format hints: numbers, brackets, question, power words. "
+                f"Keep the same topic. Mix styles: numbers, brackets, questions, power words. "
                 f"Content format: {ct}. Output as a numbered list."
             )
         else:
@@ -267,7 +261,7 @@ def ai_alt_titles(v):
                 f"Sesuai topik asli. Variasikan gaya (angka, kurung, pertanyaan). "
                 f"Format konten: {ct}. Tulis sebagai daftar bernomor."
             )
-    # fallback bilingual
+    # fallback bilingual sederhana
     base = v["title"]
     if lang == "en":
         variants = [
@@ -299,47 +293,29 @@ def ai_alt_titles(v):
 
 def ai_script_outline(v):
     ct = content_type(v)
-    lang = detect_lang(v["title"])
     if use_gemini():
-        if lang == "en":
-            return gemini_generate(
-                f"Create a YouTube script outline in ENGLISH for '{v['title']}'. "
-                f"Format: {ct}. Include: HOOK, Intro, 3–6 key sections, CTA. "
-                f"For Shorts keep ≤60s; for Live add segments (intro, agenda, chat interactions, checkpoints, closing)."
-            )
-        else:
-            return gemini_generate(
-                f"Buat kerangka skrip YouTube berbahasa INDONESIA untuk '{v['title']}'. "
-                f"Format: {ct}. Sertakan: HOOK, Intro, 3–6 bagian utama, CTA. "
-                f"Untuk Short ≤60 detik; untuk Live tambahkan segmen (pembuka, agenda, interaksi chat, checkpoint, closing)."
-            )
-    # fallback
+        return gemini_generate(
+            f"Buat kerangka skrip YouTube berbahasa Indonesia untuk '{v['title']}'. "
+            f"Format: {ct}. Sertakan: HOOK, Intro, 3–6 bagian utama, CTA. "
+            f"Untuk Short ≤60 detik; untuk Live tambahkan segmen (pembuka, agenda, interaksi chat, checkpoint, closing)."
+        )
+    # fallback Indonesia
     if ct == "Short":
-        return ("HOOK (0-3s) → INTI cepat (3-50s, 3 poin) → CTA (50-60s)") if lang=="id" \
-               else "HOOK (0-3s) → Core (3-50s, 3 points) → CTA (50-60s)"
+        return "HOOK (0-3s) → INTI cepat (3-50s, 3 poin) → CTA (50-60s)"
     if ct == "Live":
-        return ("Opening • Agenda • Interaksi Chat • Checkpoint • Closing") if lang=="id" \
-               else "Opening • Agenda • Live Chat Interaction • Checkpoints • Closing"
-    return ("Hook → Intro → 3 Bagian → Rekap → CTA") if lang=="id" \
-           else "Hook → Intro → 3 Sections → Recap → CTA"
+        return "Opening • Agenda • Interaksi Chat • Checkpoint • Closing"
+    return "Hook → Intro → 3 Bagian → Rekap → CTA"
 
 def ai_thumb_ideas(v):
     title = v["title"]
-    lang = detect_lang(title)
     kw = ", ".join(sorted({w for w in re.split(r"[^\w]+", (title + " " + v.get('description','')).lower())
                            if len(w)>=4 and w not in STOPWORDS})[:8])
     if use_gemini():
-        if lang == "en":
-            return gemini_generate(
-                f"Give 5 thumbnail ideas in ENGLISH for '{title}'. Each: one line with concept + style + composition + ≤3-word text."
-                f" Also include one generative prompt per idea (Midjourney-style). Keywords: {kw}."
-            )
-        else:
-            return gemini_generate(
-                f"Buat 5 ide thumbnail berbahasa INDONESIA untuk '{title}'. Setiap ide: 1 baris (konsep + gaya + komposisi + teks ≤3 kata). "
-                f"Sertakan 1 prompt generatif per ide (gaya Midjourney). Kata kunci: {kw}."
-            )
-    # fallback (netral)
+        return gemini_generate(
+            f"Buat 5 ide thumbnail berbahasa Indonesia untuk '{title}'. Setiap ide 1 baris: konsep + gaya + komposisi + teks ≤3 kata. "
+            f"Sertakan 1 prompt generatif per ide (gaya Midjourney). Kata kunci: {kw}."
+        )
+    # fallback Indonesia
     ideas = [
         f"Close-up objek utama + teks 2 kata\nPrompt: ultra-detailed close-up, dramatic lighting, high contrast, bold 2-word overlay",
         f"Before/After split screen\nPrompt: split-screen comparison, left dull, right vibrant, cinematic, 16:9, bold arrow",
@@ -352,7 +328,7 @@ def ai_thumb_ideas(v):
 def ai_seo_tags(v):
     title = v["title"]
     desc = v.get("description","")
-    lang = detect_lang(title)
+    lang = detect_lang(title)  # ← mengikuti bahasa judul
     base_text = (title + " " + desc).lower()
     words = [w for w in re.split(r"[^\w]+", base_text) if len(w)>=3 and w not in STOPWORDS]
     uniq = list(dict.fromkeys(words))[:40]
@@ -386,7 +362,7 @@ if submit:
     videos_all = apply_client_sort(videos_all, sort_option)
     st.session_state.last_results = videos_all
 
-    # Auto ideas (opsional)
+    # Auto IDE (tetap Indonesia)
     st.session_state.auto_ideas = None
     if videos_all and use_gemini():
         try:
@@ -509,6 +485,10 @@ if videos_to_show:
 
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
+            # optional: bersihkan query param jika sebelumnya dipakai
+            if "open" in st.query_params:
+                try: del st.query_params["open"]
+                except Exception: pass
             st.rerun()
 
     # -------- Rekomendasi Judul & Tag --------
