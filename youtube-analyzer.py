@@ -43,7 +43,6 @@ with st.sidebar:
     if st.button("Simpan", key="save_api"):
         st.session_state.api_key = api_key
         st.session_state.gemini_api = gemini_api
-        # model sudah tersimpan via key "gemini_model"
         st.success("🔑 API Key & Model berhasil disimpan!")
 
 if not st.session_state.api_key:
@@ -56,7 +55,8 @@ tab1, tab2 = st.tabs(["🔍 Cari Video", "💡 Ide Video"])
 with tab1:
     with st.form("youtube_form"):
         keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation", key="keyword_input")
-        sort_option = st.selectbox("Urutkan:", ["Paling Relevan", "Paling Banyak Ditonton", "Terbaru", "VPH Tertinggi"], key="sort_option")
+        # urutan opsi disesuaikan: VPH, Terbaru, Views, Relevan
+        sort_option = st.selectbox("Urutkan:", ["VPH Tertinggi", "Terbaru", "Paling Banyak Ditonton", "Paling Relevan"], key="sort_option")
         video_type = st.radio("Tipe Video", ["Semua", "Regular", "Short", "Live"], horizontal=True, key="video_type")
         submit = st.form_submit_button("🔍 Cari Video", key="search_video")
 
@@ -163,20 +163,65 @@ def get_trending(api_key, max_results=15):
     r = requests.get(VIDEOS_URL, params=params).json()
     return yt_videos_detail(api_key, [it["id"] for it in r.get("items",[])])
 
+# ---------------- Relevance scoring (lokal) ----------------
+def _tokenize(txt: str):
+    return [w for w in re.split(r"[^\w]+", (txt or "").lower()) if len(w) >= 3 and w not in STOPWORDS]
+
+def relevance_score(title: str, desc: str, keyword: str) -> int:
+    if not keyword: return 0
+    q = set(_tokenize(keyword))
+    if not q: return 0
+    doc = _tokenize((title or "") + " " + (desc or ""))
+    # skor = jumlah overlap + preferensi jika semua token query muncul
+    overlap = sum(1 for w in doc if w in q)
+    all_match_bonus = 5 if q.issubset(set(doc)) else 0
+    return overlap + all_match_bonus
+
+def _pub_ts(v):
+    try:
+        return datetime.strptime(v.get("publishedAt",""), "%Y-%m-%dT%H:%M:%SZ").timestamp()
+    except:
+        return 0.0
+
 # ---------------- Sort & Filter ----------------
 def map_sort_option(sort_option: str):
+    # mapping untuk panggilan API search (server-side)
     if sort_option == "Paling Banyak Ditonton": return "viewCount"
     if sort_option == "Terbaru": return "date"
-    if sort_option == "VPH Tertinggi": return "date"
+    if sort_option == "Paling Relevan": return "relevance"
+    if sort_option == "VPH Tertinggi": return "date"  # tidak ada order vph → ambil terbaru, lalu sort lokal
     return "relevance"
 
-def apply_client_sort(items, sort_option: str):
-    if sort_option == "Paling Banyak Ditonton":
-        return sorted(items, key=lambda x: x.get("views", 0), reverse=True)
-    if sort_option == "Terbaru":
-        return sorted(items, key=lambda x: x.get("publishedAt", ""), reverse=True)
+def apply_client_sort(items, sort_option: str, keyword: str = ""):
+    # Multi-key strict sorting sesuai prioritas yang diminta
     if sort_option == "VPH Tertinggi":
-        return sorted(items, key=lambda x: x.get("vph", 0.0), reverse=True)
+        return sorted(items, key=lambda x: (
+            x.get("vph", 0.0),
+            _pub_ts(x),
+            x.get("views", 0),
+            relevance_score(x.get("title",""), x.get("description",""), keyword)
+        ), reverse=True)
+    if sort_option == "Terbaru":
+        return sorted(items, key=lambda x: (
+            _pub_ts(x),
+            x.get("vph", 0.0),
+            x.get("views", 0),
+            relevance_score(x.get("title",""), x.get("description",""), keyword)
+        ), reverse=True)
+    if sort_option == "Paling Banyak Ditonton":
+        return sorted(items, key=lambda x: (
+            x.get("views", 0),
+            x.get("vph", 0.0),
+            _pub_ts(x),
+            relevance_score(x.get("title",""), x.get("description",""), keyword)
+        ), reverse=True)
+    if sort_option == "Paling Relevan":
+        return sorted(items, key=lambda x: (
+            relevance_score(x.get("title",""), x.get("description",""), keyword),
+            x.get("vph", 0.0),
+            _pub_ts(x),
+            x.get("views", 0)
+        ), reverse=True)
     return items
 
 def filter_by_video_type(items, video_type_label: str):
@@ -200,7 +245,7 @@ def generate_titles_from_data(videos, sort_option):
     if sort_option == "Paling Banyak Ditonton":
         sorted_videos = sorted(videos, key=lambda x: x["views"], reverse=True)
     elif sort_option == "Terbaru":
-        sorted_videos = sorted(videos, key=lambda x: x["publishedAt"], reverse=True)
+        sorted_videos = sorted(videos, key=lambda x: _pub_ts(x), reverse=True)
     elif sort_option == "VPH Tertinggi":
         sorted_videos = sorted(videos, key=lambda x: x["vph"], reverse=True)
     else:
@@ -223,7 +268,6 @@ def use_gemini():
     return bool(st.session_state.gemini_api)
 
 def gemini_generate(prompt: str, retries: int = 1) -> str:
-    # blokir jika sudah quota exceeded di sesi ini
     if not use_gemini() or st.session_state.get("gemini_blocked", False):
         return ""
     try:
@@ -235,7 +279,6 @@ def gemini_generate(prompt: str, retries: int = 1) -> str:
         return resp.text if hasattr(resp, "text") and resp.text else ""
     except Exception as e:
         msg = str(e)
-        # deteksi quota/rate limit → set bendera & jangan tampilkan error mentah ke UI
         if "429" in msg or "quota" in msg.lower() or "rate limit" in msg.lower():
             st.session_state["gemini_blocked"] = True
             st.session_state["gemini_last_error"] = "Batas harian Gemini tercapai. Menggunakan fallback lokal."
@@ -251,7 +294,6 @@ def content_type(v):
     return "Regular"
 
 # ---------------- AI tasks ----------------
-# NOTE: Hanya ALT TITLES & SEO TAGS yang bilingual (ID/EN). Lainnya selalu bahasa Indonesia.
 def ai_summary(v):
     title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
@@ -260,7 +302,6 @@ def ai_summary(v):
             f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
         )
         if res: return res
-    # fallback lokal
     sentences = re.split(r'(?<=[.!?])\s+', desc)[:5]
     if not sentences: sentences = [title]
     bullets = "\n".join(f"- {s}" for s in sentences)
@@ -268,7 +309,7 @@ def ai_summary(v):
 
 def ai_alt_titles(v):
     ct = content_type(v)
-    lang = detect_lang(v["title"])  # mengikuti bahasa judul
+    lang = detect_lang(v["title"])
     if use_gemini() and not st.session_state.get("gemini_blocked", False):
         if lang == "en":
             res = gemini_generate(
@@ -283,7 +324,6 @@ def ai_alt_titles(v):
                 f"Format konten: {ct}. Tulis sebagai daftar bernomor."
             )
         if res: return res
-    # fallback lokal
     base = v["title"]
     if lang == "en":
         variants = [
@@ -322,7 +362,6 @@ def ai_script_outline(v):
             f"Untuk Short ≤60 detik; untuk Live tambahkan segmen (pembuka, agenda, interaksi chat, checkpoint, closing)."
         )
         if res: return res
-    # fallback lokal
     if ct == "Short":
         return "HOOK (0-3s) → INTI cepat (3-50s, 3 poin) → CTA (50-60s)"
     if ct == "Live":
@@ -339,7 +378,6 @@ def ai_thumb_ideas(v):
             f"Sertakan 1 prompt generatif per ide (gaya Midjourney). Kata kunci: {kw}."
         )
         if res: return res
-    # fallback lokal
     ideas = [
         f"Close-up objek utama + teks 2 kata\nPrompt: ultra-detailed close-up, dramatic lighting, high contrast, bold 2-word overlay",
         f"Before/After split screen\nPrompt: split-screen comparison, left dull, right vibrant, cinematic, 16:9, bold arrow",
@@ -352,7 +390,7 @@ def ai_thumb_ideas(v):
 def ai_seo_tags(v):
     title = v["title"]
     desc = v.get("description","")
-    lang = detect_lang(title)  # mengikuti bahasa judul
+    lang = detect_lang(title)
     base_text = (title + " " + desc).lower()
     words = [w for w in re.split(r"[^\w]+", base_text) if len(w)>=3 and w not in STOPWORDS]
     uniq = list(dict.fromkeys(words))[:40]
@@ -383,7 +421,7 @@ if submit:
         videos_all = yt_videos_detail(st.session_state.api_key, ids)
 
     videos_all = filter_by_video_type(videos_all, video_type)
-    videos_all = apply_client_sort(videos_all, sort_option)
+    videos_all = apply_client_sort(videos_all, sort_option, keyword)
     st.session_state.last_results = videos_all
 
     # Auto IDE (tetap Indonesia) – skip Gemini jika blocked/quota
@@ -520,7 +558,7 @@ if videos_to_show:
 
         with c2:
             if st.button("✍️ Buat Judul Alternatif", key=f"btn_titles_{vid}"):
-                cache_set("alt_titles", ai_alt_titles(v))  # mengikuti bahasa judul & fallback jika quota
+                cache_set("alt_titles", ai_alt_titles(v))
             if cache_get("alt_titles"): st.markdown(cache_get("alt_titles"))
 
             if st.button("🖼️ Buat Ide Thumbnail", key=f"btn_thumb_{vid}"):
@@ -536,7 +574,7 @@ if videos_to_show:
 
     # -------- Rekomendasi Judul --------
     st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
-    rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "Paling Relevan"))
+    rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "VPH Tertinggi"))
     for idx, rt in enumerate(rec_titles, 1):
         col1, col2, col3 = st.columns([6, 1, 1])
         with col1: st.text_input(f"Judul {idx}", rt, key=f"judul_{idx}")
