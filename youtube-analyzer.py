@@ -26,14 +26,8 @@ if "auto_ideas" not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
-    api_key = st.text_input("YouTube Data API Key", 
-                            st.session_state.api_key, 
-                            type="password", 
-                            key="yt_api_key")   # unik
-    gemini_api = st.text_input("Gemini API Key (Opsional)", 
-                               st.session_state.gemini_api, 
-                               type="password", 
-                               key="gemini_api_key")   # unik
+    api_key = st.text_input("YouTube Data API Key", st.session_state.api_key, type="password", key="yt_api_key")
+    gemini_api = st.text_input("Gemini API Key (Opsional)", st.session_state.gemini_api, type="password", key="gemini_api_key")
     st.caption("Belum punya Gemini API Key? 👉 [Buat di sini](https://aistudio.google.com/app/apikey)")
     max_per_order = st.slider("Jumlah video per kategori", 5, 30, 15, 1, key="max_per_order")
     if st.button("Simpan", key="save_api"):
@@ -50,16 +44,9 @@ tab1, tab2 = st.tabs(["🔍 Cari Video", "💡 Ide Video"])
 
 with tab1:
     with st.form("youtube_form"):
-        keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", 
-                                placeholder="healing flute meditation", 
-                                key="keyword_input")
-        sort_option = st.selectbox("Urutkan:", 
-                                   ["Paling Relevan", "Paling Banyak Ditonton", "Terbaru", "VPH Tertinggi"], 
-                                   key="sort_option")
-        video_type = st.radio("Tipe Video", 
-                              ["Semua", "Regular", "Short", "Live"], 
-                              horizontal=True, 
-                              key="video_type")
+        keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation", key="keyword_input")
+        sort_option = st.selectbox("Urutkan:", ["Paling Relevan", "Paling Banyak Ditonton", "Terbaru", "VPH Tertinggi"], key="sort_option")
+        video_type = st.radio("Tipe Video", ["Semua", "Regular", "Short", "Live"], horizontal=True, key="video_type")
         submit = st.form_submit_button("🔍 Cari Video", key="search_video")
 
 with tab2:
@@ -69,7 +56,7 @@ with tab2:
     else:
         st.info("⚠️ Belum ada ide. Silakan cari video dulu di tab 🔍.")
 
-# ================== Utils (helper functions) ==================
+# ================== Utils ==================
 def iso8601_to_seconds(duration: str) -> int:
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration or "")
     if not m: return 0
@@ -203,6 +190,7 @@ def generate_titles_from_data(videos, sort_option):
     if len(gabungan) < 66: gabungan += " | Terpopuler"
     rekomendasi.append(trim_to_100(gabungan))
     return [trim_to_100(t) for t in rekomendasi[:10]]
+
 # ================== MAIN ==================
 if submit:
     if not keyword.strip():
@@ -217,52 +205,7 @@ if submit:
     # Filter & sort
     videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
-    st.session_state["last_results"] = videos_all
 
-    # ====== Generate ide otomatis dengan Gemini ======
-    st.session_state.auto_ideas = None
-    if videos_all and st.session_state.gemini_api:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=st.session_state.gemini_api)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-
-            top_titles = [v["title"] for v in videos_all[:5]]
-            titles_text = "\n".join([f"- {t}" for t in top_titles])
-
-            keywords = []
-            for t in top_titles:
-                for w in re.split(r"[^\w]+", t.lower()):
-                    if len(w) >= 4 and w not in STOPWORDS:
-                        keywords.append(w)
-            derived_kw = ", ".join(sorted(set(keywords))[:10])
-
-            short_count = sum(1 for v in videos_all if v.get("duration_sec", 0) <= 60)
-            live_count = sum(1 for v in videos_all if v.get("live", "none") == "live")
-            regular_count = len(videos_all) - short_count - live_count
-            if short_count > max(live_count, regular_count):
-                video_format = "Short (≤60 detik)"
-            elif live_count > max(short_count, regular_count):
-                video_format = "Live Streaming"
-            else:
-                video_format = "Video Reguler (5–30 menit)"
-
-            prompt = f"""
-Berdasarkan hasil pencarian video YouTube berikut:
-
-{titles_text}
-
-Kata kunci turunan: {derived_kw}
-Jenis konten dominan: {video_format}
-
-Buatkan 5 ide konten video baru yang relevan.
-"""
-            resp = model.generate_content(prompt)
-            st.session_state.auto_ideas = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
-        except Exception as e:
-            st.session_state.auto_ideas = f"❌ Error Gemini: {e}"
-
-    # ======= Tampilkan hasil video + judul/tag/CSV =======
     if not videos_all:
         st.error("❌ Tidak ada video ditemukan")
     else:
@@ -270,30 +213,19 @@ Buatkan 5 ide konten video baru yang relevan.
         all_titles, rows_for_csv = [], []
         for i, v in enumerate(videos_all):
             with cols[i % 3]:
-                badge = ""
-                if v["live"] == "live":
-                    badge = "<div style='position:absolute;top:6px;left:6px;background:#e53935;color:white;padding:2px 6px;font-size:12px;border-radius:4px;font-weight:600;'>LIVE</div>"
-                elif v.get("duration_sec", 0) <= 60:
-                    badge = "<div style='position:absolute;top:6px;left:6px;background:#1e88e5;color:white;padding:2px 6px;font-size:12px;border-radius:4px;font-weight:600;'>SHORT</div>"
+                # Thumbnail klik → popup
                 if v["thumbnail"]:
-                    st.markdown(
-                        f"<div style='position:relative;display:inline-block;width:100%;'>"
-                        f"{badge}"
-                        f"<img src='{v['thumbnail']}' style='width:100%;border-radius:10px;display:block;'>"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
-                st.markdown(f"**{v['title']}**")
-                st.caption(v["channel"])
+                    if st.button(" ", key=f"thumb_btn_{i}"):
+                        st.session_state["popup_video"] = v
+                    st.image(v["thumbnail"], use_column_width=True)
 
-                c1, c2, c3 = st.columns(3)
-                with c1: st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;'>👁 {format_views(v['views'])}</div>", unsafe_allow_html=True)
-                with c2: st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;'>⚡ {v['vph']}</div>", unsafe_allow_html=True)
-                with c3: st.markdown(f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 8px;border-radius:8px;'>⏱ {format_rel_time(v['publishedAt'])}</div>", unsafe_allow_html=True)
-                st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
-
-                if st.button("🔍 Detail", key=f"detail_btn_{i}"):
+                # Judul klik → popup
+                if st.button(v["title"], key=f"title_btn_{i}"):
                     st.session_state["popup_video"] = v
+
+                st.caption(v["channel"])
+                st.caption(f"👁 {format_views(v['views'])} | ⚡ {v['vph']} VPH | ⏱ {format_rel_time(v['publishedAt'])}")
+                st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
 
             all_titles.append(v["title"])
             rows_for_csv.append({
