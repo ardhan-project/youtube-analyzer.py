@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import re
 import io
 import zipfile
-import html as html_lib  # untuk escape judul/deskripsi di HTML
+import html as html_lib  # escape judul/deskripsi
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -209,26 +209,23 @@ if submit:
 
     videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
-    st.session_state.last_results = videos_all  # simpan supaya persist
+    st.session_state.last_results = videos_all  # persist
 
-    # Generate ide otomatis (sekali saat submit)
+    # Generate ide otomatis (opsional)
     st.session_state.auto_ideas = None
     if videos_all and st.session_state.gemini_api:
         try:
             import google.generativeai as genai
             genai.configure(api_key=st.session_state.gemini_api)
             model = genai.GenerativeModel("gemini-1.5-flash")
-
             top_titles = [v["title"] for v in videos_all[:5]]
             titles_text = "\n".join([f"- {t}" for t in top_titles])
-
             keywords = []
             for t in top_titles:
                 for w in re.split(r"[^\w]+", t.lower()):
                     if len(w) >= 4 and w not in STOPWORDS:
                         keywords.append(w)
             derived_kw = ", ".join(sorted(set(keywords))[:10])
-
             short_count = sum(1 for v in videos_all if v.get("duration_sec", 0) <= 60)
             live_count = sum(1 for v in videos_all if v.get("live", "none") == "live")
             regular_count = len(videos_all) - short_count - live_count
@@ -238,7 +235,6 @@ if submit:
                 video_format = "Live Streaming"
             else:
                 video_format = "Video Reguler (5–30 menit)"
-
             prompt = f"""
 Berdasarkan hasil pencarian video YouTube berikut:
 
@@ -257,11 +253,8 @@ Buatkan 5 ide konten video baru yang relevan.
 # ================== Render results from state (selalu jalan) ==================
 videos_to_show = st.session_state.last_results
 
-# Cek query param ?open=VIDEO_ID → set popup
-try:
-    open_param = st.experimental_get_query_params().get("open", [None])[0]
-except Exception:
-    open_param = None
+# Baca query param open via API baru
+open_param = st.query_params.get("open", None)
 if open_param and videos_to_show:
     chosen = next((v for v in videos_to_show if v["id"] == open_param), None)
     if chosen:
@@ -271,13 +264,13 @@ if videos_to_show:
     cols = st.columns(3)
     all_titles, rows_for_csv = [], []
 
-    # CSS kecil biar judul terlihat link
+    # CSS kecil
     st.markdown("""
     <style>
     a.title-link { text-decoration:none; font-weight:600; display:block; margin-top:6px; }
     a.title-link:hover { text-decoration:underline; }
     .thumb-wrap { position:relative; display:block; cursor:pointer; }
-    .badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px; 
+    .badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px;
              border-radius:4px; font-weight:700; }
     .badge-live { background:#e53935; }
     .badge-short{ background:#1e88e5; }
@@ -294,17 +287,23 @@ if videos_to_show:
             elif v.get("duration_sec", 0) <= 60:
                 badge_html = '<div class="badge badge-short">SHORT</div>'
 
-            # Thumbnail (klik → query param open=video_id)
+            # Thumbnail (klik → set query param melalui JS; tidak buka tab baru)
             if v.get("thumbnail"):
                 st.markdown(
-                    f'<a class="thumb-wrap" href="?open={v["id"]}">{badge_html}'
-                    f'<img class="thumb" src="{v["thumbnail"]}"></a>',
+                    f"""<div class="thumb-wrap" onclick="window.parent.location.search='?open={v["id"]}'">
+                           {badge_html}
+                           <img class="thumb" src="{v["thumbnail"]}">
+                        </div>""",
                     unsafe_allow_html=True
                 )
 
-            # Judul (klik → query param open=video_id)
+            # Judul (klik → set query param; tidak buka tab baru)
             safe_title = html_lib.escape(v["title"])
-            st.markdown(f'<a class="title-link" href="?open={v["id"]}">{safe_title}</a>', unsafe_allow_html=True)
+            st.markdown(
+                f"""<a class="title-link" href="javascript:void(0)" 
+                      onclick="window.parent.location.search='?open={v["id"]}'">{safe_title}</a>""",
+                unsafe_allow_html=True
+            )
 
             st.caption(v["channel"])
 
@@ -350,10 +349,9 @@ if videos_to_show:
 
         if st.button("❌ Tutup", key="close_popup"):
             st.session_state.popup_video = None
-            try:
-                st.experimental_set_query_params()  # clear ?open
-            except Exception:
-                pass
+            # Hapus query param open dengan API baru
+            if "open" in st.query_params:
+                del st.query_params["open"]
             st.rerun()
 
     # ===== Rekomendasi Judul =====
