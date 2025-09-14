@@ -20,22 +20,31 @@ VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 # ---------------- Session init ----------------
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 if "gemini_api" not in st.session_state: st.session_state.gemini_api = ""
+if "gemini_model" not in st.session_state: st.session_state.gemini_model = "gemini-1.5-flash-8b"
+if "gemini_blocked" not in st.session_state: st.session_state.gemini_blocked = False
+if "gemini_last_error" not in st.session_state: st.session_state.gemini_last_error = ""
 if "auto_ideas" not in st.session_state: st.session_state.auto_ideas = None
 if "last_results" not in st.session_state: st.session_state.last_results = []
 if "popup_video" not in st.session_state: st.session_state.popup_video = None
 if "ai_cache" not in st.session_state: st.session_state.ai_cache = {}   # {video_id: {task: text}}
+
+# Info banner kalau quota sudah keblok
+if st.session_state.get("gemini_blocked"):
+    st.info("ℹ️ Fitur Gemini dibatasi hari ini (quota tercapai). App otomatis pakai fallback lokal agar tetap jalan.")
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("⚙️ Pengaturan")
     api_key = st.text_input("YouTube Data API Key", st.session_state.api_key, type="password", key="yt_api_key")
     gemini_api = st.text_input("Gemini API Key (Opsional)", st.session_state.gemini_api, type="password", key="gemini_api_key")
+    gemini_model = st.selectbox("Gemini Model", ["gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"], index=0, key="gemini_model")
     st.caption("Belum punya Gemini API Key? 👉 [Buat di sini](https://aistudio.google.com/app/apikey)")
     max_per_order = st.slider("Jumlah video per kategori", 5, 30, 15, 1, key="max_per_order")
     if st.button("Simpan", key="save_api"):
         st.session_state.api_key = api_key
         st.session_state.gemini_api = gemini_api
-        st.success("🔑 API Key berhasil disimpan!")
+        # model sudah tersimpan via key "gemini_model"
+        st.success("🔑 API Key & Model berhasil disimpan!")
 
 if not st.session_state.api_key:
     st.warning("⚠️ Masukkan API Key di sidebar untuk mulai")
@@ -213,17 +222,28 @@ def generate_titles_from_data(videos, sort_option):
 def use_gemini():
     return bool(st.session_state.gemini_api)
 
-def gemini_generate(prompt: str) -> str:
-    if not use_gemini():
+def gemini_generate(prompt: str, retries: int = 1) -> str:
+    # blokir jika sudah quota exceeded di sesi ini
+    if not use_gemini() or st.session_state.get("gemini_blocked", False):
         return ""
     try:
         import google.generativeai as genai
         genai.configure(api_key=st.session_state.gemini_api)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model_name = st.session_state.get("gemini_model", "gemini-1.5-flash-8b")
+        model = genai.GenerativeModel(model_name)
         resp = model.generate_content(prompt)
-        return resp.text if hasattr(resp, "text") else ""
+        return resp.text if hasattr(resp, "text") and resp.text else ""
     except Exception as e:
-        return f"❌ Error Gemini: {e}"
+        msg = str(e)
+        # deteksi quota/rate limit → set bendera & jangan tampilkan error mentah ke UI
+        if "429" in msg or "quota" in msg.lower() or "rate limit" in msg.lower():
+            st.session_state["gemini_blocked"] = True
+            st.session_state["gemini_last_error"] = "Batas harian Gemini tercapai. Menggunakan fallback lokal."
+            return ""
+        if retries > 0:
+            return gemini_generate(prompt, retries - 1)
+        st.session_state["gemini_last_error"] = msg
+        return ""
 
 def content_type(v):
     if v.get("live") == "live": return "Live"
@@ -234,32 +254,36 @@ def content_type(v):
 # NOTE: Hanya ALT TITLES & SEO TAGS yang bilingual (ID/EN). Lainnya selalu bahasa Indonesia.
 def ai_summary(v):
     title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
-    if use_gemini():
-        return gemini_generate(
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
+        res = gemini_generate(
             f"Ringkas video YouTube berikut menjadi 5 poin bullet berbahasa Indonesia, fokus manfaat untuk penonton, hindari klaim berlebihan.\n"
             f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
         )
+        if res: return res
+    # fallback lokal
     sentences = re.split(r'(?<=[.!?])\s+', desc)[:5]
     if not sentences: sentences = [title]
     bullets = "\n".join(f"- {s}" for s in sentences)
-    return f"**Ringkasan (heuristik)**\n{bullets}"
+    return f"**Ringkasan (fallback lokal)**\n{bullets}"
 
 def ai_alt_titles(v):
     ct = content_type(v)
     lang = detect_lang(v["title"])  # mengikuti bahasa judul
-    if use_gemini():
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         if lang == "en":
-            return gemini_generate(
+            res = gemini_generate(
                 f"Write 10 alternative YouTube titles (≤100 chars) in ENGLISH for the video '{v['title']}'. "
                 f"Keep the same topic. Mix styles: numbers, brackets, questions, power words. "
                 f"Content format: {ct}. Output as a numbered list."
             )
         else:
-            return gemini_generate(
+            res = gemini_generate(
                 f"Buat 10 judul alternatif YouTube (≤100 karakter) dalam BAHASA INDONESIA untuk video '{v['title']}'. "
                 f"Sesuai topik asli. Variasikan gaya (angka, kurung, pertanyaan). "
                 f"Format konten: {ct}. Tulis sebagai daftar bernomor."
             )
+        if res: return res
+    # fallback lokal
     base = v["title"]
     if lang == "en":
         variants = [
@@ -291,12 +315,14 @@ def ai_alt_titles(v):
 
 def ai_script_outline(v):
     ct = content_type(v)
-    if use_gemini():
-        return gemini_generate(
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
+        res = gemini_generate(
             f"Buat kerangka skrip YouTube berbahasa Indonesia untuk '{v['title']}'. "
             f"Format: {ct}. Sertakan: HOOK, Intro, 3–6 bagian utama, CTA. "
             f"Untuk Short ≤60 detik; untuk Live tambahkan segmen (pembuka, agenda, interaksi chat, checkpoint, closing)."
         )
+        if res: return res
+    # fallback lokal
     if ct == "Short":
         return "HOOK (0-3s) → INTI cepat (3-50s, 3 poin) → CTA (50-60s)"
     if ct == "Live":
@@ -307,11 +333,13 @@ def ai_thumb_ideas(v):
     title = v["title"]
     kw = ", ".join(sorted({w for w in re.split(r"[^\w]+", (title + " " + v.get('description','')).lower())
                            if len(w)>=4 and w not in STOPWORDS})[:8])
-    if use_gemini():
-        return gemini_generate(
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
+        res = gemini_generate(
             f"Buat 5 ide thumbnail berbahasa Indonesia untuk '{title}'. Setiap ide 1 baris: konsep + gaya + komposisi + teks ≤3 kata. "
             f"Sertakan 1 prompt generatif per ide (gaya Midjourney). Kata kunci: {kw}."
         )
+        if res: return res
+    # fallback lokal
     ideas = [
         f"Close-up objek utama + teks 2 kata\nPrompt: ultra-detailed close-up, dramatic lighting, high contrast, bold 2-word overlay",
         f"Before/After split screen\nPrompt: split-screen comparison, left dull, right vibrant, cinematic, 16:9, bold arrow",
@@ -329,7 +357,7 @@ def ai_seo_tags(v):
     words = [w for w in re.split(r"[^\w]+", base_text) if len(w)>=3 and w not in STOPWORDS]
     uniq = list(dict.fromkeys(words))[:40]
     fallback = ", ".join(uniq)[:500]
-    if use_gemini():
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         if lang == "en":
             text = gemini_generate(
                 "Generate comma-separated YouTube SEO tags in ENGLISH (≤500 chars). "
@@ -358,9 +386,9 @@ if submit:
     videos_all = apply_client_sort(videos_all, sort_option)
     st.session_state.last_results = videos_all
 
-    # Auto IDE (tetap Indonesia)
+    # Auto IDE (tetap Indonesia) – skip Gemini jika blocked/quota
     st.session_state.auto_ideas = None
-    if videos_all and use_gemini():
+    if videos_all and use_gemini() and not st.session_state.get("gemini_blocked", False):
         try:
             top_titles = [v["title"] for v in videos_all[:5]]
             titles_text = "\n".join([f"- {t}" for t in top_titles])
@@ -379,9 +407,32 @@ if submit:
             st.session_state.auto_ideas = gemini_generate(
                 f"Berdasarkan judul-judul:\n{titles_text}\n\nKata kunci turunan: {derived_kw}\n"
                 f"Jenis konten dominan: {fmt}\nBuatkan 5 ide video lengkap dengan SIAPA/APA/BAGAIMANA dan IDE VISUAL (1 per ide)."
+            ) or ""
+        except Exception:
+            st.session_state.auto_ideas = ""
+
+    # Fallback lokal agar tab ide tetap berguna jika kosong/blocked
+    if (st.session_state.auto_ideas is None) or (st.session_state.auto_ideas.strip() == ""):
+        if videos_all:
+            sample = videos_all[:5]
+            fmt_dom = "Short (≤60 detik)" if sum(1 for v in sample if v.get("duration_sec",0)<=60) > 2 else \
+                      "Live Streaming" if sum(1 for v in sample if v.get("live","none")=="live") > 2 else "Video Reguler (5–30 menit)"
+            kws = []
+            for v in sample:
+                for w in re.split(r"[^\w]+", v["title"].lower()):
+                    if len(w) >= 4 and w not in STOPWORDS:
+                        kws.append(w)
+            kws = ", ".join(sorted(set(kws))[:10])
+            st.session_state.auto_ideas = (
+                f"**Format dominan:** {fmt_dom}\n\n"
+                f"**Kata kunci turunan:** {kws}\n\n"
+                "### 5 Ide Video (fallback lokal)\n"
+                "1) **SIAPA**: Pemula • **APA**: Panduan cepat • **BAGAIMANA**: 3 langkah praktis • **Visual**: close-up + teks 2 kata\n"
+                "2) **SIAPA**: Pekerja sibuk • **APA**: Trik hemat waktu • **BAGAIMANA**: tips 1 menit • **Visual**: before/after split\n"
+                "3) **SIAPA**: Konten kreator • **APA**: Optimasi judul & tag • **BAGAIMANA**: checklist • **Visual**: ikon + gradient\n"
+                "4) **SIAPA**: Penonton live • **APA**: Q&A topik tren • **BAGAIMANA**: rundown segmen • **Visual**: agenda + emoji chat\n"
+                "5) **SIAPA**: Pemula editing • **APA**: Efek instan • **BAGAIMANA**: step-by-step • **Visual**: infografik 1-2-3\n"
             )
-        except Exception as e:
-            st.session_state.auto_ideas = f"❌ Error Gemini: {e}"
 
 # ---------------- Render results ----------------
 videos_to_show = st.session_state.last_results
@@ -469,7 +520,7 @@ if videos_to_show:
 
         with c2:
             if st.button("✍️ Buat Judul Alternatif", key=f"btn_titles_{vid}"):
-                cache_set("alt_titles", ai_alt_titles(v))  # mengikuti bahasa judul
+                cache_set("alt_titles", ai_alt_titles(v))  # mengikuti bahasa judul & fallback jika quota
             if cache_get("alt_titles"): st.markdown(cache_get("alt_titles"))
 
             if st.button("🖼️ Buat Ide Thumbnail", key=f"btn_thumb_{vid}"):
