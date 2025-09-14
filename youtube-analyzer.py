@@ -576,8 +576,8 @@ if submit:
 
     # Fallback lokal agar tab ide tetap berguna jika kosong/blocked
     if (st.session_state.auto_ideas is None) or (st.session_state.auto_ideas.strip() == ""):
-        if videos_all:
-            sample = videos_all[:5]
+        if st.session_state.last_results:
+            sample = st.session_state.last_results[:5]
             fmt_dom = "Short (≤60 detik)" if sum(1 for v in sample if v.get("duration_sec",0)<=60) > 2 else \
                       "Live Streaming" if sum(1 for v in sample if v.get("live","none")=="live") > 2 else "Video Reguler (5–30 menit)"
             kws = []
@@ -597,24 +597,41 @@ if submit:
                 "5) **SIAPA**: Pemula editing • **APA**: Efek instan • **BAGAIMANA**: step-by-step • **Visual**: infografik 1-2-3\n"
             )
 
-# ---------------- CSS ----------------
+# ---------------- CSS (YouTube-like) ----------------
 st.markdown("""
 <style>
-.badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px;
-         border-radius:4px; font-weight:700; }
-.badge-live { background:#e53935; }
-.badge-short{ background:#1e88e5; }
-.thumbwrap { position:relative; }
-img.thumb { width:100%; border-radius:10px; display:block; }
-.linklike > button { background:none !important; border:none !important; padding:0 !important;
-                     color:#1f6feb; text-decoration:none; font-weight:600; cursor:pointer; }
-.linklike > button:hover { text-decoration:underline; }
-.chip { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; margin-right:6px; margin-bottom:6px; color:white; }
-.chip-views { background:#ff4b4b; }
-.chip-vph { background:#4b8bff; }
-.chip-time { background:#4caf50; }
-.chip-dur { background:#795548; }
-.dialog-actions > div > button { width:100%; }
+/* --- YouTube-like card --- */
+.yt-card{
+  display:flex; flex-direction:column; gap:8px;
+  padding: 4px; border-radius: 12px;
+}
+.yt-thumb{ position:relative; border-radius:12px; overflow:hidden;
+  aspect-ratio: 16/9; background:#101114; }
+.yt-thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+
+/* badges */
+.yt-badge{ position:absolute; right:8px; bottom:8px;
+  background: rgba(0,0,0,.85); color:#fff; font-size:12px; padding:2px 6px; border-radius:4px; }
+.yt-badge.live{ left:8px; right:auto; top:8px; bottom:auto; background:#cc0000; font-weight:700; }
+.yt-badge.short{ left:8px; right:auto; top:8px; bottom:auto; background:#1e88e5; }
+
+/* title button looks like link, clamp 2 lines */
+.yt-title{ margin-top:4px; }
+.yt-title > button{
+  background:none !important; border:none !important; padding:0 !important;
+  text-align:left; width:100%; cursor:pointer;
+  color:#e6e6e6; font-weight:600; font-size:15px; line-height:1.25;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+}
+.yt-title > button:hover{ text-decoration:underline; }
+
+/* channel + meta */
+.yt-channel{ color:#9aa0a6; font-size:13px; }
+.yt-meta{ color:#9aa0a6; font-size:12px; }
+.yt-dot::before{ content:"•"; margin:0 .35rem; color:#9aa0a6; }
+
+/* full width buttons inside dialog */
+.dialog-actions > div > button{ width:100%; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -708,44 +725,49 @@ if HAS_DIALOG:
             st.session_state.popup_video = None
             st.rerun()
 
-# ---------------- Render results ----------------
+# ---------------- Render results (YouTube-like cards) ----------------
 videos_to_show = st.session_state.last_results
 
 if videos_to_show:
     cols = st.columns(3)
     all_titles, rows_for_csv = [], []
+
     for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
-            # Thumbnail (display + badge)
-            badge_html = ""
-            if v.get("live") == "live": badge_html = '<div class="badge badge-live">LIVE</div>'
-            elif v.get("duration_sec", 0) <= 60: badge_html = '<div class="badge badge-short">SHORT</div>'
+            st.markdown("<div class='yt-card'>", unsafe_allow_html=True)
+
+            # THUMBNAIL 16:9 + BADGES
+            dur_badge = f"<span class='yt-badge'>{v.get('duration','-')}</span>"
+            live_badge = "<span class='yt-badge live'>LIVE</span>" if v.get("live")=="live" else ""
+            short_badge = "<span class='yt-badge short'>SHORT</span>" if (v.get("duration_sec",0)<=60 and v.get("live")=='none') else ""
+            badge_left = live_badge or short_badge  # prioritas LIVE
+
             if v.get("thumbnail"):
-                st.markdown(f'<div class="thumbwrap">{badge_html}<img class="thumb" src="{v["thumbnail"]}"></div>',
-                            unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div class='yt-thumb'>
+                      <img src="{v['thumbnail']}" alt="thumb">
+                      {badge_left}
+                      {"" if v.get("live")=="live" else dur_badge}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
-            # Buttons: Preview + Title (link-like)
-            pcol1, pcol2 = st.columns([1, 4])
-            with pcol1:
-                if st.button("🔍 Preview", key=f"preview_btn_{i}"):
-                    st.session_state.popup_video = v
-                    if HAS_DIALOG:
-                        video_preview_dialog()
-            with pcol2:
-                st.markdown('<div class="linklike">', unsafe_allow_html=True)
-                if st.button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview"):
-                    st.session_state.popup_video = v
-                    if HAS_DIALOG:
-                        video_preview_dialog()
-                st.markdown('</div>', unsafe_allow_html=True)
+            # TITLE (klik → popup)
+            st.markdown("<div class='yt-title'>", unsafe_allow_html=True)
+            if st.button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview"):
+                st.session_state.popup_video = v
+                if HAS_DIALOG:
+                    video_preview_dialog()
+            st.markdown("</div>", unsafe_allow_html=True)
 
-            st.caption(v["channel"])
-            c1, c2, c3, c4 = st.columns(4)
-            with c1: st.markdown(f"<span class='chip chip-views'>👁 {format_views(v['views'])}</span>", unsafe_allow_html=True)
-            with c2: st.markdown(f"<span class='chip chip-vph'>⚡ {v['vph']}</span>", unsafe_allow_html=True)
-            with c3: st.markdown(f"<span class='chip chip-time'>⏱ {format_rel_time(v['publishedAt'])}</span>", unsafe_allow_html=True)
-            with c4: st.markdown(f"<span class='chip chip-dur'>⏳ {v.get('duration','-')}</span>", unsafe_allow_html=True)
-            st.caption(f"📅 {format_jam_utc(v['publishedAt'])}")
+            # CHANNEL + META (views • waktu lalu)
+            st.markdown(f"<div class='yt-channel'>{v['channel']}</div>", unsafe_allow_html=True)
+            meta = f"{format_views(v['views'])} x ditonton <span class='yt-dot'></span> {format_rel_time(v['publishedAt'])}"
+            st.markdown(f"<div class='yt-meta'>{meta}</div>", unsafe_allow_html=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)  # end .yt-card
 
         all_titles.append(v["title"])
         rows_for_csv.append({
@@ -860,4 +882,4 @@ if videos_to_show:
             zf.writestr("auto_ideas.txt", ideas_txt_bytes)
         st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
 else:
-    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **🔍 Preview** atau **judul** untuk membuka popup.")
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **judul** untuk membuka popup.")
