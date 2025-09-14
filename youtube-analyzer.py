@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import re
 import io
 import zipfile
+import html as html_lib  # untuk escape judul/deskripsi di HTML
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -23,6 +24,10 @@ if "gemini_api" not in st.session_state:
     st.session_state.gemini_api = ""
 if "auto_ideas" not in st.session_state:
     st.session_state.auto_ideas = None
+if "last_results" not in st.session_state:
+    st.session_state.last_results = []
+if "popup_video" not in st.session_state:
+    st.session_state.popup_video = None
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -191,129 +196,209 @@ def generate_titles_from_data(videos, sort_option):
     rekomendasi.append(trim_to_100(gabungan))
     return [trim_to_100(t) for t in rekomendasi[:10]]
 
-# ================== MAIN ==================
+# ================== Handle submit (update state) ==================
 if submit:
     if not keyword.strip():
         st.info("📈 Menampilkan trending (default US)")
-        videos_all = get_trending(st.session_state.api_key, max_per_order)
+        videos_all = get_trending(st.session_state.api_key, st.session_state.get("max_per_order", 15))
     else:
         st.info(f"🔎 Riset keyword: {keyword}")
         order = map_sort_option(sort_option)
-        ids = yt_search_ids(st.session_state.api_key, keyword, order, max_per_order)
+        ids = yt_search_ids(st.session_state.api_key, keyword, order, st.session_state.get("max_per_order", 15))
         videos_all = yt_videos_detail(st.session_state.api_key, ids)
 
-    # Filter & sort
     videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
+    st.session_state.last_results = videos_all  # simpan supaya persist
 
-    if not videos_all:
-        st.error("❌ Tidak ada video ditemukan")
-    else:
-        cols = st.columns(3)
-        all_titles, rows_for_csv = [], []
-        for i, v in enumerate(videos_all):
-            with cols[i % 3]:
-                # Thumbnail klik → popup
-                if v["thumbnail"]:
-                    if st.button(f"thumb_{i}", key=f"thumb_btn_{i}"):
-                        st.session_state["popup_video"] = v
-                    st.markdown(
-                        f"""
-                        <div style="cursor:pointer;" onclick="window.parent.postMessage({{'setVideo':'{v['id']}' }}, '*')">
-                            <img src="{v['thumbnail']}" style="width:100%;border-radius:10px;">
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
+    # Generate ide otomatis (sekali saat submit)
+    st.session_state.auto_ideas = None
+    if videos_all and st.session_state.gemini_api:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=st.session_state.gemini_api)
+            model = genai.GenerativeModel("gemini-1.5-flash")
 
-                # Judul klik → popup
-                if st.button(v["title"], key=f"title_btn_{i}"):
-                    st.session_state["popup_video"] = v
+            top_titles = [v["title"] for v in videos_all[:5]]
+            titles_text = "\n".join([f"- {t}" for t in top_titles])
 
-                st.caption(v["channel"])
-                st.caption(f"👁 {format_views(v['views'])} | ⚡ {v['vph']} VPH | ⏱ {format_rel_time(v['publishedAt'])}")
-                st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
+            keywords = []
+            for t in top_titles:
+                for w in re.split(r"[^\w]+", t.lower()):
+                    if len(w) >= 4 and w not in STOPWORDS:
+                        keywords.append(w)
+            derived_kw = ", ".join(sorted(set(keywords))[:10])
 
-            all_titles.append(v["title"])
-            rows_for_csv.append({
-                "Judul": v["title"],
-                "Channel": v["channel"],
-                "Views": v["views"],
-                "VPH": v["vph"],
-                "Tanggal (relatif)": format_rel_time(v["publishedAt"]),
-                "Jam Publish (UTC)": format_jam_utc(v["publishedAt"]),
-                "Durasi": v.get("duration","-"),
-                "Link": f"https://www.youtube.com/watch?v={v['id']}"
-            })
+            short_count = sum(1 for v in videos_all if v.get("duration_sec", 0) <= 60)
+            live_count = sum(1 for v in videos_all if v.get("live", "none") == "live")
+            regular_count = len(videos_all) - short_count - live_count
+            if short_count > max(live_count, regular_count):
+                video_format = "Short (≤60 detik)"
+            elif live_count > max(short_count, regular_count):
+                video_format = "Live Streaming"
+            else:
+                video_format = "Video Reguler (5–30 menit)"
 
-        # ===== Popup Video Detail =====
-        if "popup_video" in st.session_state:
-            v = st.session_state["popup_video"]
-            st.markdown("---")
-            st.subheader("📺 Video Detail")
-            st.video(f"https://www.youtube.com/watch?v={v['id']}")
-            st.markdown(f"### {v['title']}")
+            prompt = f"""
+Berdasarkan hasil pencarian video YouTube berikut:
+
+{titles_text}
+
+Kata kunci turunan: {derived_kw}
+Jenis konten dominan: {video_format}
+
+Buatkan 5 ide konten video baru yang relevan.
+"""
+            resp = model.generate_content(prompt)
+            st.session_state.auto_ideas = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
+        except Exception as e:
+            st.session_state.auto_ideas = f"❌ Error Gemini: {e}"
+
+# ================== Render results from state (selalu jalan) ==================
+videos_to_show = st.session_state.last_results
+
+# Cek query param ?open=VIDEO_ID → set popup
+try:
+    open_param = st.experimental_get_query_params().get("open", [None])[0]
+except Exception:
+    open_param = None
+if open_param and videos_to_show:
+    chosen = next((v for v in videos_to_show if v["id"] == open_param), None)
+    if chosen:
+        st.session_state.popup_video = chosen
+
+if videos_to_show:
+    cols = st.columns(3)
+    all_titles, rows_for_csv = [], []
+
+    # CSS kecil biar judul terlihat link
+    st.markdown("""
+    <style>
+    a.title-link { text-decoration:none; font-weight:600; display:block; margin-top:6px; }
+    a.title-link:hover { text-decoration:underline; }
+    .thumb-wrap { position:relative; display:block; cursor:pointer; }
+    .badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px; 
+             border-radius:4px; font-weight:700; }
+    .badge-live { background:#e53935; }
+    .badge-short{ background:#1e88e5; }
+    img.thumb { width:100%; border-radius:10px; display:block; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    for i, v in enumerate(videos_to_show):
+        with cols[i % 3]:
+            # Badge
+            badge_html = ""
+            if v.get("live") == "live":
+                badge_html = '<div class="badge badge-live">LIVE</div>'
+            elif v.get("duration_sec", 0) <= 60:
+                badge_html = '<div class="badge badge-short">SHORT</div>'
+
+            # Thumbnail (klik → query param open=video_id)
+            if v.get("thumbnail"):
+                st.markdown(
+                    f'<a class="thumb-wrap" href="?open={v["id"]}">{badge_html}'
+                    f'<img class="thumb" src="{v["thumbnail"]}"></a>',
+                    unsafe_allow_html=True
+                )
+
+            # Judul (klik → query param open=video_id)
+            safe_title = html_lib.escape(v["title"])
+            st.markdown(f'<a class="title-link" href="?open={v["id"]}">{safe_title}</a>', unsafe_allow_html=True)
+
             st.caption(v["channel"])
-            st.write(v.get("description", "Tidak ada deskripsi."))
 
-            st.subheader("✨ Asisten Konten AI")
-            col1, col2 = st.columns(2)
-            with col1: st.button("📑 Ringkas Video Ini", key="ai_summary")
-            with col2: st.button("✍️ Buat Judul Alternatif", key="ai_titles")
-            col3, col4 = st.columns(2)
-            with col3: st.button("📝 Buat Kerangka Skrip", key="ai_script")
-            with col4: st.button("🖼️ Buat Ide Thumbnail", key="ai_thumb")
-            st.button("🏷️ Buat Tag SEO", key="ai_tags")
+            c1, c2, c3 = st.columns(3)
+            with c1: st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;'>👁 {format_views(v['views'])}</div>", unsafe_allow_html=True)
+            with c2: st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;'>⚡ {v['vph']}</div>", unsafe_allow_html=True)
+            with c3: st.markdown(f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 8px;border-radius:8px;'>⏱ {format_rel_time(v['publishedAt'])}</div>", unsafe_allow_html=True)
+            st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
 
-            if v.get("channelId"):
-                st.markdown(f"[🌐 Kunjungi Channel YouTube](https://www.youtube.com/channel/{v['channelId']})")
+        all_titles.append(v["title"])
+        rows_for_csv.append({
+            "Judul": v["title"],
+            "Channel": v["channel"],
+            "Views": v["views"],
+            "VPH": v["vph"],
+            "Tanggal (relatif)": format_rel_time(v["publishedAt"]),
+            "Jam Publish (UTC)": format_jam_utc(v["publishedAt"]),
+            "Durasi": v.get("duration","-"),
+            "Link": f"https://www.youtube.com/watch?v={v['id']}"
+        })
 
-            if st.button("❌ Tutup", key="close_popup"):
-                del st.session_state["popup_video"]
+    # ===== Popup Video Detail =====
+    if st.session_state.popup_video:
+        v = st.session_state.popup_video
+        st.markdown("---")
+        st.subheader("📺 Video Detail")
+        st.video(f"https://www.youtube.com/watch?v={v['id']}")
+        st.markdown(f"### {v['title']}")
+        st.caption(v["channel"])
+        st.write(v.get("description", "Tidak ada deskripsi."))
 
-        # ===== Rekomendasi Judul =====
-        st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
-        rec_titles = generate_titles_from_data(videos_all, sort_option)
-        for idx, rt in enumerate(rec_titles, 1):
-            col1, col2, col3 = st.columns([6, 1, 1])
-            with col1: st.text_input(f"Judul {idx}", rt, key=f"judul_{idx}")
-            with col2: st.markdown(f"<span style='font-size:12px;color:gray'>{len(rt)}/100</span>", unsafe_allow_html=True)
-            with col3: st.button("📋", key=f"copy_judul_{idx}", on_click=lambda t=rt: st.session_state.update({"copied": t}))
+        st.subheader("✨ Asisten Konten AI")
+        col1, col2 = st.columns(2)
+        with col1: st.button("📑 Ringkas Video Ini", key="ai_summary")
+        with col2: st.button("✍️ Buat Judul Alternatif", key="ai_titles")
+        col3, col4 = st.columns(2)
+        with col3: st.button("📝 Buat Kerangka Skrip", key="ai_script")
+        with col4: st.button("🖼️ Buat Ide Thumbnail", key="ai_thumb")
+        st.button("🏷️ Buat Tag SEO", key="ai_tags")
 
-        if "copied" in st.session_state:
-            st.success(f"Judul tersalin: {st.session_state['copied']}")
-            st.session_state.pop("copied")
+        if v.get("channelId"):
+            st.markdown(f"[🌐 Kunjungi Channel YouTube](https://www.youtube.com/channel/{v['channelId']})")
 
-        # ===== Rekomendasi Tag =====
-        st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
-        uniq_words, seen = [], set()
-        for t in all_titles:
-            for w in re.split(r"[^\w]+", t.lower()):
-                if len(w) >= 3 and w not in STOPWORDS and w not in seen:
-                    uniq_words.append(w); seen.add(w)
-        tag_string = ", ".join(uniq_words)
-        if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
+        if st.button("❌ Tutup", key="close_popup"):
+            st.session_state.popup_video = None
+            try:
+                st.experimental_set_query_params()  # clear ?open
+            except Exception:
+                pass
+            st.rerun()
 
-        col1, col2 = st.columns([8, 1])
-        with col1: st.text_area("Tag", tag_string, height=100, key="tag_area")
-        with col2: st.button("📋", key="copy_tag", on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
+    # ===== Rekomendasi Judul =====
+    st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
+    rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "Paling Relevan"))
+    for idx, rt in enumerate(rec_titles, 1):
+        col1, col2, col3 = st.columns([6, 1, 1])
+        with col1: st.text_input(f"Judul {idx}", rt, key=f"judul_{idx}")
+        with col2: st.markdown(f"<span style='font-size:12px;color:gray'>{len(rt)}/100</span>", unsafe_allow_html=True)
+        with col3: st.button("📋", key=f"copy_judul_{idx}", on_click=lambda t=rt: st.session_state.update({"copied": t}))
+    if "copied" in st.session_state:
+        st.success(f"Judul tersalin: {st.session_state['copied']}")
+        st.session_state.pop("copied")
 
-        if "copied_tag" in st.session_state:
-            st.success("✅ Tag tersalin!")
-            st.session_state.pop("copied_tag")
+    # ===== Rekomendasi Tag =====
+    st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
+    uniq_words, seen = [], set()
+    for t in all_titles:
+        for w in re.split(r"[^\w]+", t.lower()):
+            if len(w) >= 3 and w not in STOPWORDS and w not in seen:
+                uniq_words.append(w); seen.add(w)
+    tag_string = ", ".join(uniq_words)
+    if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
 
-        # ===== Download Data =====
-        st.subheader("⬇️ Download Data")
-        df = pd.DataFrame(rows_for_csv)
-        csv_video_bytes = df.to_csv(index=False).encode("utf-8")
-        st.download_button("Download CSV (Video)", csv_video_bytes, "youtube_riset.csv", "text/csv", key="dl_csv")
+    col1, col2 = st.columns([8, 1])
+    with col1: st.text_area("Tag", tag_string, height=100, key="tag_area")
+    with col2: st.button("📋", key="copy_tag", on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
+    if "copied_tag" in st.session_state:
+        st.success("✅ Tag tersalin!")
+        st.session_state.pop("copied_tag")
 
-        if st.session_state.auto_ideas:
-            ideas_txt_bytes = st.session_state.auto_ideas.encode("utf-8")
-            st.download_button("Download Ide (TXT)", ideas_txt_bytes, "auto_ideas.txt", "text/plain", key="dl_txt")
+    # ===== Download Data =====
+    st.subheader("⬇️ Download Data")
+    df = pd.DataFrame(rows_for_csv)
+    csv_video_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button("Download CSV (Video)", csv_video_bytes, "youtube_riset.csv", "text/csv", key="dl_csv")
 
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("youtube_riset.csv", csv_video_bytes)
-                zf.writestr("auto_ideas.txt", ideas_txt_bytes)
-            st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
+    if st.session_state.auto_ideas:
+        ideas_txt_bytes = st.session_state.auto_ideas.encode("utf-8")
+        st.download_button("Download Ide (TXT)", ideas_txt_bytes, "auto_ideas.txt", "text/plain", key="dl_txt")
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("youtube_riset.csv", csv_video_bytes)
+            zf.writestr("auto_ideas.txt", ideas_txt_bytes)
+        st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
+else:
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik thumbnail/judul untuk membuka preview.")
