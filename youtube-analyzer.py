@@ -157,7 +157,7 @@ IND_HINT = {"yang","dan","di","ke","dari","untuk","pada","kami","kamu","anda","s
 ENG_HINT = {"the","and","for","with","to","from","you","your","how","why","what","best","guide","review","tips","tricks","new","free","without","vs","top","in","on","of"}
 def detect_lang(text: str) -> str:
     t = text.lower()
-    toks = re.findall(r"\w+", t)
+    toks = re.findall(r"\w+", t, flags=re.UNICODE)
     id_score = sum(1 for w in toks if (w in IND_HINT) or w.startswith(("meng","men","mem","me","ber","ter","per","se")))
     en_score = sum(1 for w in toks if w in ENG_HINT)
     return "id" if id_score >= en_score else "en"
@@ -184,7 +184,6 @@ THEME_SYN = {
     "ko":["치유","명상","릴랙스","수면"], "zh":["治愈","冥想","放松","睡眠"], "vi":["chữa lành","thiền","thư giãn","ngủ"],
     "th":["รักษา","ทำสมาธิ","ผ่อนคลาย","นอน"]
 }
-# reverse index untuk deteksi cepat
 def _rev_index(syndict):
     r = {}
     for lang, terms in syndict.items():
@@ -198,51 +197,46 @@ LANG_PRIORITY = ["en","id","es","pt","fr","de","ru","ar","hi","ja","ko","zh","tr
 
 def expand_keyword_variants(user_q: str, max_variants: int = 10):
     """
-    Kembalikan list varian (query, lang) agar tetap satu niche walau beda bahasa.
-    Logika: deteksi instrumen/region/tema dari input (di bahasa apapun), lalu
-    buat frase standar di banyak bahasa (maks 10).
+    Tanpa '\\p{L}'. Deteksi instrumen/region/tema dari input (multi-bahasa),
+    lalu buat frase standar di banyak bahasa.
     """
     qnorm = user_q.strip()
     if not qnorm:
         return []
-    toks = re.findall(r"\w+|\p{L}+", qnorm, flags=re.UNICODE) if hasattr(re, "UNICODE") else re.findall(r"\w+", qnorm)
+    # deteksi bahasa lewat normalisasi teks (split Unicode-friendly)
+    text_lower = qnorm.lower()
+    # pisahkan dengan negasi berbagai rentang huruf agar aman untuk Unicode tanpa \p{L}
+    tokens = re.split(r"[^\w\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u4E00-\u9FFF]+", text_lower)
 
     instr_langs, region_langs, theme_langs = set(), set(), set()
-    text_lower = qnorm.lower()
-    # deteksi semua kemunculan dari kamus
-    for w in re.split(r"[^\w\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u06FF\u3040-\u30FF\u4E00-\u9FFF]+", text_lower):
+    for w in tokens:
+        if not w: continue
         if w in REV_INSTR: instr_langs.add(REV_INSTR[w][0])
         if w in REV_REGION: region_langs.add(REV_REGION[w][0])
         if w in REV_THEME: theme_langs.add(REV_THEME[w][0])
 
-    # base languages: yang terdeteksi + prioritas default (en,id)
     langs = []
     for lang in LANG_PRIORITY:
         if (lang in instr_langs) or (lang in region_langs) or (lang in theme_langs) or (lang in ["en","id"]):
             langs.append(lang)
-    # unik & batasi
+    # unik
     seen=set(); ordered=[]
     for l in langs:
         if l not in seen:
             ordered.append(l); seen.add(l)
-    langs = ordered[:max_variants]  # caps
+    langs = ordered[:max_variants]
 
     variants = []
-    variants.append((qnorm, None))  # varian asli (tanpa hint language)
+    variants.append((qnorm, None))  # varian asli
     for lang in langs:
         parts = []
-        if instr_langs:
-            parts.append(INSTR_SYN[lang][0])
-        if region_langs:
-            parts.append(REGION_SYN[lang][0])
-        if theme_langs:
-            parts.append(THEME_SYN[lang][0])
-        # kalau tidak terdeteksi apapun dari kamus, skip varian bahasa itu
-        if not parts:
-            continue
+        if instr_langs:  parts.append(INSTR_SYN[lang][0])
+        if region_langs: parts.append(REGION_SYN[lang][0])
+        if theme_langs:  parts.append(THEME_SYN[lang][0])
+        if not parts:    continue
         phrase = " ".join(parts)
         variants.append((phrase, lang))
-    # unik berdasarkan query string
+
     uq, out = set(), []
     for q, l in variants:
         if q.lower() not in uq:
@@ -260,7 +254,7 @@ def yt_search_ids(api_key, query, order, max_results, video_type_label="Semua", 
         "key": api_key
     }
     if video_type_label == "Short":
-        params["videoDuration"] = "short"   # pre-filter
+        params["videoDuration"] = "short"
     elif video_type_label == "Live":
         params["eventType"] = "live"
     if lang: params["relevanceLanguage"] = lang
@@ -547,7 +541,6 @@ def search_multilang_union(api_key, user_keyword, order, max_per_query, video_ty
         return []
     all_ids = []
     seen = set()
-    # region sampling untuk jangkau beberapa market besar
     REGIONS = ["US","ID","IN","JP","KR","DE","FR","ES","BR","RU","TR","SA","EG","VN","MX"]
     r_idx = 0
     for (q, lang) in variants:
@@ -557,7 +550,7 @@ def search_multilang_union(api_key, user_keyword, order, max_per_query, video_ty
         for vid in ids:
             if vid not in seen:
                 all_ids.append(vid); seen.add(vid)
-    return all_ids[:120]  # batas aman
+    return all_ids[:120]
 
 if submit:
     st.session_state.keyword_input = keyword
@@ -567,23 +560,18 @@ if submit:
     else:
         st.info(f"🔎 Riset keyword (lintas bahasa): {keyword}")
         order = map_sort_option(sort_option)
-        # >>>> Multilingual search di sini
         ids = search_multilang_union(
             st.session_state.api_key, keyword, order,
             st.session_state.get("max_per_order", 15),
             st.session_state.get("video_type","Semua")
         )
-        # fetch detail batched (maks 50 id per panggilan)
         videos_all = []
         for i in range(0, len(ids), 50):
             videos_all.extend(yt_videos_detail(st.session_state.api_key, ids[i:i+50]))
 
-    # Post-filter agar benar-benar bersih
     videos_all = filter_by_video_type(videos_all, st.session_state.get("video_type","Semua"))
     videos_all = apply_client_sort(videos_all, sort_option, st.session_state.keyword_input)
     st.session_state.last_results = videos_all
-
-    # Auto-ideas (ringkas; sama seperti sebelumnya, tidak diubah)
     st.session_state.auto_ideas = None
 
 # ---------------- CSS ----------------
