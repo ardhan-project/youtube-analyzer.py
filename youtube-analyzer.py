@@ -206,22 +206,38 @@ if submit:
             import google.generativeai as genai
             genai.configure(api_key=st.session_state.gemini_api)
             model = genai.GenerativeModel("gemini-1.5-flash")
+
             top_titles = [v["title"] for v in videos_all[:5]]
             titles_text = "\n".join([f"- {t}" for t in top_titles])
+
+            # kata kunci turunan
             keywords = []
             for t in top_titles:
                 for w in re.split(r"[^\w]+", t.lower()):
                     if len(w) >= 4 and w not in STOPWORDS:
                         keywords.append(w)
             derived_kw = ", ".join(sorted(set(keywords))[:10])
+
+            # cek format dominan
+            short_count = sum(1 for v in videos_all if v.get("duration_sec", 0) <= 60)
+            live_count = sum(1 for v in videos_all if v.get("live", "none") == "live")
+            regular_count = len(videos_all) - short_count - live_count
+            if short_count > max(live_count, regular_count):
+                video_format = "Short (≤60 detik)"
+            elif live_count > max(short_count, regular_count):
+                video_format = "Live Streaming"
+            else:
+                video_format = "Video Reguler (5–30 menit)"
+
             prompt = f"""
 Berdasarkan hasil pencarian video YouTube berikut:
 
 {titles_text}
 
 Kata kunci turunan: {derived_kw}
+Jenis konten dominan: {video_format}
 
-Buatkan 5 ide konten video baru yang relevan.
+Buatkan 5 ide konten video baru yang relevan, disesuaikan dengan format dominan di atas.
 Untuk setiap ide gunakan format:
 
 📌 STRATEGI KONTEN
@@ -243,12 +259,17 @@ Untuk setiap ide gunakan format:
 - Bentuk Konten: …
 - Durasi: …
 - Frekuensi: …
+
+🎨 IDE VISUAL:
+- Prompt contoh visual sinematik/realistis sesuai ide (minimal 1),
+  misalnya untuk AI image generator (Midjourney, Leonardo).
 """
             resp = model.generate_content(prompt)
             st.session_state["auto_ideas"] = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
         except Exception as e:
             st.session_state["auto_ideas"] = f"❌ Error Gemini: {e}"
 
+    # ======= Tampilkan hasil video + judul/tag/CSV (tetap seperti sebelumnya) =======
     if not videos_all:
         st.error("❌ Tidak ada video ditemukan")
     else:
@@ -302,14 +323,4 @@ Untuk setiap ide gunakan format:
                     uniq_words.append(w); seen.add(w)
         tag_string = ", ".join(uniq_words)
         if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
-        col1, col2 = st.columns([8, 1])
-        with col1: st.text_area("Tag", tag_string, height=100)
-        with col2: st.button("📋", key="copy_tag", help="Salin tag", on_click=lambda t=tag_string: st.session_state.update({"copied_tag": t}))
-        if "copied_tag" in st.session_state:
-            st.success("✅ Tag tersalin!")
-            st.session_state.pop("copied_tag")
-
-        # ===== Download CSV =====
-        st.subheader("⬇️ Download Data")
-        df = pd.DataFrame(rows_for_csv)
-        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), "youtube_riset.csv", "text/csv")
+        col1, col2 = st
