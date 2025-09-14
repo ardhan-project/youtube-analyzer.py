@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 import re
 import io
 import zipfile
+import html as html_lib
 from statistics import mean, median
-from collections import Counter
 try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
+from collections import Counter
 
 st.set_page_config(page_title="YouTube Trending Explorer", layout="wide")
 st.title("🎬 YouTube Trending Explorer")
@@ -23,36 +24,35 @@ SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
 # ---------------- Session init ----------------
-ss = st.session_state
-ss.setdefault("api_key", "")
-ss.setdefault("gemini_api", "")
-ss.setdefault("gemini_model", "gemini-1.5-flash-8b")
-ss.setdefault("gemini_blocked", False)
-ss.setdefault("gemini_last_error", "")
-ss.setdefault("auto_ideas", None)
-ss.setdefault("last_results", [])
-ss.setdefault("popup_video", None)
-ss.setdefault("ai_cache", {})   # {video_id: {task: text}}
-ss.setdefault("keyword_input", "")
-ss.setdefault("max_per_order", 15)
+if "api_key" not in st.session_state: st.session_state.api_key = ""
+if "gemini_api" not in st.session_state: st.session_state.gemini_api = ""
+if "gemini_model" not in st.session_state: st.session_state.gemini_model = "gemini-1.5-flash-8b"
+if "gemini_blocked" not in st.session_state: st.session_state.gemini_blocked = False
+if "gemini_last_error" not in st.session_state: st.session_state.gemini_last_error = ""
+if "auto_ideas" not in st.session_state: st.session_state.auto_ideas = None
+if "last_results" not in st.session_state: st.session_state.last_results = []
+if "popup_video" not in st.session_state: st.session_state.popup_video = None
+if "ai_cache" not in st.session_state: st.session_state.ai_cache = {}   # {video_id: {task: text}}
+if "keyword_input" not in st.session_state: st.session_state.keyword_input = ""
 
-if ss.get("gemini_blocked"):
-    st.info("ℹ️ Fitur Gemini dibatasi hari ini (quota tercapai). App pakai fallback lokal agar tetap jalan.")
+# Info banner kalau quota sudah keblok
+if st.session_state.get("gemini_blocked"):
+    st.info("ℹ️ Fitur Gemini dibatasi hari ini (quota tercapai). App otomatis pakai fallback lokal agar tetap jalan.")
 
 # ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("⚙️ Pengaturan")
-    api_key = st.text_input("YouTube Data API Key", ss.api_key, type="password", key="yt_api_key")
-    gemini_api = st.text_input("Gemini API Key (Opsional)", ss.gemini_api, type="password", key="gemini_api_key")
+    api_key = st.text_input("YouTube Data API Key", st.session_state.api_key, type="password", key="yt_api_key")
+    gemini_api = st.text_input("Gemini API Key (Opsional)", st.session_state.gemini_api, type="password", key="gemini_api_key")
     gemini_model = st.selectbox("Gemini Model", ["gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"], index=0, key="gemini_model")
     st.caption("Belum punya Gemini API Key? 👉 [Buat di sini](https://aistudio.google.com/app/apikey)")
-    ss.max_per_order = st.slider("Jumlah video per kategori", 5, 30, ss.max_per_order, 1, key="max_per_order_slider")
+    max_per_order = st.slider("Jumlah video per kategori", 5, 30, 15, 1, key="max_per_order")
     if st.button("Simpan", key="save_api"):
-        ss.api_key = api_key
-        ss.gemini_api = gemini_api
-        st.success("🔑 API Key & Model tersimpan!")
+        st.session_state.api_key = api_key
+        st.session_state.gemini_api = gemini_api
+        st.success("🔑 API Key & Model berhasil disimpan!")
 
-if not ss.api_key:
+if not st.session_state.api_key:
     st.warning("⚠️ Masukkan API Key di sidebar untuk mulai")
     st.stop()
 
@@ -62,6 +62,7 @@ tab1, tab2 = st.tabs(["🔍 Cari Video", "💡 Ide Video"])
 with tab1:
     with st.form("youtube_form"):
         keyword = st.text_input("Kata Kunci (kosongkan untuk Trending)", placeholder="healing flute meditation", key="keyword_form_input")
+        # urutan opsi disesuaikan: VPH, Terbaru, Views, Relevan
         sort_option = st.selectbox("Urutkan:", ["VPH Tertinggi", "Terbaru", "Paling Banyak Ditonton", "Paling Relevan"], key="sort_option")
         video_type = st.radio("Tipe Video", ["Semua", "Regular", "Short", "Live"], horizontal=True, key="video_type")
         submit = st.form_submit_button("🔍 Cari Video", key="search_video")
@@ -121,9 +122,15 @@ def asia_jakarta_hour(dt_utc_str: str) -> int | None:
     except:
         return None
 
-# ---------- Lang detect ----------
-IND_HINT = {"yang","dan","di","ke","dari","untuk","pada","kami","kamu","anda","saja","bisa","tidak","cara","apa","bagaimana","mengapa","gratis","terbaru","banget","sangat","dengan","tanpa","lebih","menjadi","agar","supaya"}
-ENG_HINT = {"the","and","for","with","to","from","you","your","how","why","what","best","guide","review","tips","tricks","new","free","without","vs","top","in","on","of"}
+# ---------- Lang detect (ID/EN) ----------
+IND_HINT = {
+    "yang","dan","di","ke","dari","untuk","pada","kami","kamu","anda","saja","bisa","tidak","cara","apa",
+    "bagaimana","mengapa","gratis","terbaru","banget","sangat","dengan","tanpa","lebih","menjadi","agar","supaya"
+}
+ENG_HINT = {
+    "the","and","for","with","to","from","you","your","how","why","what","best","guide","review","tips",
+    "tricks","new","free","without","vs","top","in","on","of"
+}
 def detect_lang(text: str) -> str:
     t = text.lower()
     toks = re.findall(r"\w+", t)
@@ -168,7 +175,7 @@ def get_trending(api_key, max_results=15):
     r = requests.get(VIDEOS_URL, params=params).json()
     return yt_videos_detail(api_key, [it["id"] for it in r.get("items",[])])
 
-# ---------------- relevance/sort/filter ----------------
+# ---------------- Relevance & helpers ----------------
 def _tokenize(txt: str):
     return [w for w in re.split(r"[^\w]+", (txt or "").lower()) if len(w) >= 3 and w not in STOPWORDS]
 
@@ -187,22 +194,43 @@ def pub_ts(v):
     except:
         return 0.0
 
+# ---------------- Sort & Filter ----------------
 def map_sort_option(sort_option: str):
     if sort_option == "Paling Banyak Ditonton": return "viewCount"
     if sort_option == "Terbaru": return "date"
     if sort_option == "Paling Relevan": return "relevance"
-    if sort_option == "VPH Tertinggi": return "date"  # ambil terbaru, lalu sort lokal VPH
+    if sort_option == "VPH Tertinggi": return "date"
     return "relevance"
 
 def apply_client_sort(items, sort_option: str, keyword: str = ""):
     if sort_option == "VPH Tertinggi":
-        return sorted(items, key=lambda x: (x.get("vph", 0.0), pub_ts(x), x.get("views", 0), relevance_score(x.get("title",""), x.get("description",""), keyword)), reverse=True)
+        return sorted(items, key=lambda x: (
+            x.get("vph", 0.0),
+            pub_ts(x),
+            x.get("views", 0),
+            relevance_score(x.get("title",""), x.get("description",""), keyword)
+        ), reverse=True)
     if sort_option == "Terbaru":
-        return sorted(items, key=lambda x: (pub_ts(x), x.get("vph", 0.0), x.get("views", 0), relevance_score(x.get("title",""), x.get("description",""), keyword)), reverse=True)
+        return sorted(items, key=lambda x: (
+            pub_ts(x),
+            x.get("vph", 0.0),
+            x.get("views", 0),
+            relevance_score(x.get("title",""), x.get("description",""), keyword)
+        ), reverse=True)
     if sort_option == "Paling Banyak Ditonton":
-        return sorted(items, key=lambda x: (x.get("views", 0), x.get("vph", 0.0), pub_ts(x), relevance_score(x.get("title",""), x.get("description",""), keyword)), reverse=True)
+        return sorted(items, key=lambda x: (
+            x.get("views", 0),
+            x.get("vph", 0.0),
+            pub_ts(x),
+            relevance_score(x.get("title",""), x.get("description",""), keyword)
+        ), reverse=True)
     if sort_option == "Paling Relevan":
-        return sorted(items, key=lambda x: (relevance_score(x.get("title",""), x.get("description",""), keyword), x.get("vph", 0.0), pub_ts(x), x.get("views", 0)), reverse=True)
+        return sorted(items, key=lambda x: (
+            relevance_score(x.get("title",""), x.get("description",""), keyword),
+            x.get("vph", 0.0),
+            pub_ts(x),
+            x.get("views", 0)
+        ), reverse=True)
     return items
 
 def filter_by_video_type(items, video_type_label: str):
@@ -214,7 +242,7 @@ def filter_by_video_type(items, video_type_label: str):
         return [v for v in items if v.get("live", "none") == "live"]
     return items
 
-# ---------------- judul rekom (list 10) ----------------
+# ---------------- Judul Generator (list 10) ----------------
 def trim_to_100(text):
     if len(text) <= 100: return text
     trimmed = text[:100]
@@ -244,28 +272,29 @@ def generate_titles_from_data(videos, sort_option):
     rekomendasi.append(trim_to_100(gabungan))
     return [trim_to_100(t) for t in rekomendasi[:10]]
 
-# ---------------- Gemini helpers & AI tasks ----------------
+# ---------------- Gemini helpers ----------------
 def use_gemini():
-    return bool(ss.gemini_api)
+    return bool(st.session_state.gemini_api)
 
 def gemini_generate(prompt: str, retries: int = 1) -> str:
-    if not use_gemini() or ss.get("gemini_blocked", False):
+    if not use_gemini() or st.session_state.get("gemini_blocked", False):
         return ""
     try:
         import google.generativeai as genai
-        genai.configure(api_key=ss.gemini_api)
-        model = genai.GenerativeModel(ss.gemini_model)
+        genai.configure(api_key=st.session_state.gemini_api)
+        model_name = st.session_state.get("gemini_model", "gemini-1.5-flash-8b")
+        model = genai.GenerativeModel(model_name)
         resp = model.generate_content(prompt)
         return resp.text if hasattr(resp, "text") and resp.text else ""
     except Exception as e:
         msg = str(e)
         if "429" in msg or "quota" in msg.lower() or "rate limit" in msg.lower():
-            ss["gemini_blocked"] = True
-            ss["gemini_last_error"] = "Batas harian Gemini tercapai. Fallback lokal digunakan."
+            st.session_state["gemini_blocked"] = True
+            st.session_state["gemini_last_error"] = "Batas harian Gemini tercapai. Menggunakan fallback lokal."
             return ""
         if retries > 0:
             return gemini_generate(prompt, retries - 1)
-        ss["gemini_last_error"] = msg
+        st.session_state["gemini_last_error"] = msg
         return ""
 
 def content_type(v):
@@ -273,9 +302,10 @@ def content_type(v):
     if v.get("duration_sec", 0) <= 60: return "Short"
     return "Regular"
 
+# ---------------- AI tasks ----------------
 def ai_summary(v):
     title, desc, ch = v["title"], v.get("description",""), v.get("channel","")
-    if use_gemini() and not ss.get("gemini_blocked", False):
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         res = gemini_generate(
             f"Ringkas video YouTube berikut menjadi 5 poin bullet berbahasa Indonesia, fokus manfaat untuk penonton, hindari klaim berlebihan.\n"
             f"Judul: {title}\nChannel: {ch}\nDeskripsi:\n{desc[:3000]}"
@@ -289,7 +319,7 @@ def ai_summary(v):
 def ai_alt_titles(v):
     ct = content_type(v)
     lang = detect_lang(v["title"])
-    if use_gemini() and not ss.get("gemini_blocked", False):
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         if lang == "en":
             res = gemini_generate(
                 f"Write 10 alternative YouTube titles (≤100 chars) in ENGLISH for the video '{v['title']}'. "
@@ -334,7 +364,7 @@ def ai_alt_titles(v):
 
 def ai_script_outline(v):
     ct = content_type(v)
-    if use_gemini() and not ss.get("gemini_blocked", False):
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         res = gemini_generate(
             f"Buat kerangka skrip YouTube berbahasa Indonesia untuk '{v['title']}'. "
             f"Format: {ct}. Sertakan: HOOK, Intro, 3–6 bagian utama, CTA. "
@@ -351,7 +381,7 @@ def ai_thumb_ideas(v):
     title = v["title"]
     kw = ", ".join(sorted({w for w in re.split(r"[^\w]+", (title + " " + v.get('description','')).lower())
                            if len(w)>=4 and w not in STOPWORDS})[:8])
-    if use_gemini() and not ss.get("gemini_blocked", False):
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         res = gemini_generate(
             f"Buat 5 ide thumbnail berbahasa Indonesia untuk '{title}'. Setiap ide 1 baris: konsep + gaya + komposisi + teks ≤3 kata. "
             f"Sertakan 1 prompt generatif per ide (gaya Midjourney). Kata kunci: {kw}."
@@ -374,13 +404,17 @@ def ai_seo_tags(v):
     words = [w for w in re.split(r"[^\w]+", base_text) if len(w)>=3 and w not in STOPWORDS]
     uniq = list(dict.fromkeys(words))[:40]
     fallback = ", ".join(uniq)[:500]
-    if use_gemini() and not ss.get("gemini_blocked", False):
+    if use_gemini() and not st.session_state.get("gemini_blocked", False):
         if lang == "en":
-            text = gemini_generate("Generate comma-separated YouTube SEO tags in ENGLISH (≤500 chars). "
-                                   f"Use keywords from the title/description.\nTitle: {title}\nDescription: {desc[:1500]}")
+            text = gemini_generate(
+                "Generate comma-separated YouTube SEO tags in ENGLISH (≤500 chars). "
+                f"Use keywords from the title/description.\nTitle: {title}\nDescription: {desc[:1500]}"
+            )
         else:
-            text = gemini_generate("Buat daftar tag SEO YouTube berbahasa INDONESIA (dipisahkan koma, ≤500 karakter). "
-                                   f"Gunakan kata kunci dari judul/deskripsi.\nJudul: {title}\nDeskripsi: {desc[:1500]}")
+            text = gemini_generate(
+                "Buat daftar tag SEO YouTube berbahasa INDONESIA (dipisahkan koma, ≤500 karakter). "
+                f"Gunakan kata kunci dari judul/deskripsi.\nJudul: {title}\nDeskripsi: {desc[:1500]}"
+            )
         return text if text else fallback
     return fallback
 
@@ -435,65 +469,89 @@ def render_niche_summary(videos, keyword: str) -> str:
     label = format_label_from_tokens(tokens)
     hrs = publish_hour_stats(vids)
     stat = views_stats(vids)
+
     if "432hz" in tokens or "meditation" in tokens or "meditasi" in tokens:
-        siapa = ("- Usia: 18–44\n- Gender: Campuran\n- Lokasi: Global (WIB untuk pasar ID)\n"
-                 "- Status: Mahasiswa/pekerja pencari ketenangan\n- Masalah: Stres, sulit tidur, susah fokus\n- Harapan: Tenang, tidur lelap, energi positif")
-        apa = ("- Kebutuhan/Minat: Musik meditasi, suara alam, 432Hz, chakra, fokus belajar\n"
-               "- Jenis Konten: Track 10–60 mnt, panduan napas singkat, live relaksasi mingguan")
-        bagaimana = ("- Gaya: Tenang, minim bicara, visual menenangkan\n"
-                     "- Bentuk: Reguler (mix panjang), Shorts (teknik 60 detik), Live (Q&A & breathing)\n"
-                     "- Durasi: 30–60 mnt (reguler) / ≤60 dtk (short)\n- Frekuensi: 3–5x/minggu + 1 live/minggu")
+        siapa = (
+            "- Usia: 18–44\n"
+            "- Gender: Campuran\n"
+            "- Lokasi: Global (WIB kuat untuk pasar ID)\n"
+            "- Status: Mahasiswa/pekerja, pencari ketenangan\n"
+            "- Masalah: Stres, sulit tidur, susah fokus\n"
+            "- Harapan: Tenang, tidur lelap, energi positif"
+        )
+        apa = (
+            "- Kebutuhan/Minat: Musik meditasi, suara alam, 432Hz, chakra, fokus belajar\n"
+            "- Jenis Konten: Track 10–60 mnt, panduan napas singkat, live relaksasi mingguan"
+        )
+        bagaimana = (
+            "- Gaya: Tenang, minim bicara, visual menenangkan\n"
+            "- Bentuk: Reguler (mix panjang), Shorts (teknik 60 detik), Live (Q&A & breathing)\n"
+            "- Durasi: 30–60 mnt (reguler) / ≤60 dtk (short)\n"
+            "- Frekuensi: 3–5x/minggu + 1 live/minggu"
+        )
     else:
-        siapa = ("- Usia: 18–40\n- Gender: Campuran\n- Lokasi: Global\n- Status: Pemula di niche\n"
-                 "- Masalah: Minim referensi\n- Harapan: Panduan ringkas & jelas")
+        siapa = (
+            "- Usia: 18–40\n- Gender: Campuran\n- Lokasi: Global\n- Status: Pemula di niche\n"
+            "- Masalah: Kurang referensi & struktur belajar\n- Harapan: Panduan ringkas & jelas"
+        )
         apa = "- Kebutuhan/Minat: Tutorial praktis, ringkasan topik, rekomendasi alat\n- Jenis Konten: How-to, listicle, live Q&A"
-        bagaimana = "- Gaya: To the point • Bentuk: Reguler/Short • Durasi: 5–15 mnt (reg) / ≤60 dtk (short) • Frekuensi: 3x/minggu"
+        bagaimana = "- Gaya: Langsung ke poin • Bentuk: Reguler/Short • Durasi: 5–15 mnt (reg) / ≤60 dtk (short) • Frekuensi: 3x/minggu"
+
     if hrs["top"]:
         top_list = ", ".join(f"{h:02d} (n={c})" for h,c in hrs["top"])
         saran = ", ".join(window_hour(h) for h,_ in hrs["top"][:2])
         jam_md = f"**Rata-rata:** {hrs['avg']:02d}:00 WIB • **Puncak:** {top_list}\n**Saran upload:** {saran}"
     else:
         jam_md = "Data jam publish tidak cukup."
+
     total = max(len(vids),1)
     fmt_md = f"Short: {s} • Live: {l} • Reguler: {r} (total {total})"
     tok_md = ", ".join(sorted(list(tokens))[:12])
+
     bullets = [
         f"Niche: **{label}** • Format dominan → {('Reguler' if r>=max(s,l) else 'Short' if s>=max(l,r) else 'Live')}",
-        f"Sampel: **{stat['n']}** • Avg views **{format_views(stat['avg'])}** • Median **{format_views(stat['med'])}** • Avg VPH **{stat['vph']}**",
+        f"Sampel: **{stat['n']}** video • Rata-rata views **{format_views(stat['avg'])}** • Median **{format_views(stat['med'])}** • VPH rata-rata **{stat['vph']}**",
         f"Topik kunci: {tok_md}",
         f"Waktu publish efektif (WIB): {jam_md}",
-        "Strategi: fokus format dominan + variasi yang cepat perform (Short/Live)."
+        "Strategi: jaga konsistensi format dominan + selingi variasi yang cepat perform (Short/Live)."
     ]
-    md = ("### 📊 Ringkasan Niche (otomatis)\n"
-          f"- **Label:** {label}\n- **Distribusi Format:** {fmt_md}\n\n"
-          "### 🧠 SIAPA (Target)\n" + siapa + "\n\n"
-          "### 📚 APA (Minat)\n" + apa + "\n\n"
-          "### 🎯 BAGAIMANA (Eksekusi)\n" + bagaimana + "\n\n"
-          f"### 🕒 Rata-rata Jam Publish (WIB)\n{jam_md}\n\n"
-          "### 📈 Metrik Ringkas\n"
-          f"- Sampel: **{stat['n']}**\n- Rata-rata Views: **{format_views(stat['avg'])}** • Median: **{format_views(stat['med'])}**\n- VPH rata-rata: **{stat['vph']}**\n\n"
-          "### 📌 Rangkuman Ketat\n" + "\n".join(f"- {b}" for b in bullets))
+
+    md = (
+        "### 📊 Ringkasan Niche (otomatis)\n"
+        f"- **Label:** {label}\n"
+        f"- **Distribusi Format:** {fmt_md}\n\n"
+        "### 🧠 SIAPA (Target)\n" + siapa + "\n\n"
+        "### 📚 APA (Minat)\n" + apa + "\n\n"
+        "### 🎯 BAGAIMANA (Eksekusi)\n" + bagaimana + "\n\n"
+        f"### 🕒 Rata-rata Jam Publish (WIB)\n{jam_md}\n\n"
+        "### 📈 Metrik Ringkas\n"
+        f"- Sampel: **{stat['n']}**\n"
+        f"- Rata-rata Views: **{format_views(stat['avg'])}** • Median: **{format_views(stat['med'])}**\n"
+        f"- VPH rata-rata: **{stat['vph']}**\n\n"
+        "### 📌 Rangkuman Ketat\n"
+        + "\n".join(f"- {b}" for b in bullets)
+    )
     return md
 
-# ---------------- Handle submit ----------------
+# ---------------- Handle submit: fetch & store ----------------
 if submit:
-    ss.keyword_input = keyword
+    st.session_state.keyword_input = keyword
     if not keyword.strip():
         st.info("📈 Menampilkan trending (default US)")
-        videos_all = get_trending(ss.api_key, ss.max_per_order)
+        videos_all = get_trending(st.session_state.api_key, st.session_state.get("max_per_order", 15))
     else:
         st.info(f"🔎 Riset keyword: {keyword}")
         order = map_sort_option(sort_option)
-        ids = yt_search_ids(ss.api_key, keyword, order, ss.max_per_order)
-        videos_all = yt_videos_detail(ss.api_key, ids)
+        ids = yt_search_ids(st.session_state.api_key, keyword, order, st.session_state.get("max_per_order", 15))
+        videos_all = yt_videos_detail(st.session_state.api_key, ids)
 
-    videos_all = filter_by_video_type(videos_all, ss.get("video_type","Semua"))
-    videos_all = apply_client_sort(videos_all, sort_option, ss.keyword_input)
-    ss.last_results = videos_all
+    videos_all = filter_by_video_type(videos_all, st.session_state.get("video_type","Semua"))
+    videos_all = apply_client_sort(videos_all, sort_option, st.session_state.keyword_input)
+    st.session_state.last_results = videos_all
 
-    # Auto IDE via Gemini (opsional) + fallback lokal
-    ss.auto_ideas = None
-    if videos_all and use_gemini() and not ss.get("gemini_blocked", False):
+    # Auto IDE (tetap Indonesia) – skip Gemini jika blocked/quota
+    st.session_state.auto_ideas = None
+    if videos_all and use_gemini() and not st.session_state.get("gemini_blocked", False):
         try:
             top_titles = [v["title"] for v in videos_all[:5]]
             titles_text = "\n".join([f"- {t}" for t in top_titles])
@@ -509,14 +567,15 @@ if submit:
             if short_count > max(live_count, regular_count): fmt = "Short (≤60 detik)"
             elif live_count > max(short_count, regular_count): fmt = "Live Streaming"
             else: fmt = "Video Reguler (5–30 menit)"
-            ss.auto_ideas = gemini_generate(
+            st.session_state.auto_ideas = gemini_generate(
                 f"Berdasarkan judul-judul:\n{titles_text}\n\nKata kunci turunan: {derived_kw}\n"
                 f"Jenis konten dominan: {fmt}\nBuatkan 5 ide video lengkap dengan SIAPA/APA/BAGAIMANA dan IDE VISUAL (1 per ide)."
             ) or ""
         except Exception:
-            ss.auto_ideas = ""
+            st.session_state.auto_ideas = ""
 
-    if (ss.auto_ideas is None) or (ss.auto_ideas.strip() == ""):
+    # Fallback lokal agar tab ide tetap berguna jika kosong/blocked
+    if (st.session_state.auto_ideas is None) or (st.session_state.auto_ideas.strip() == ""):
         if videos_all:
             sample = videos_all[:5]
             fmt_dom = "Short (≤60 detik)" if sum(1 for v in sample if v.get("duration_sec",0)<=60) > 2 else \
@@ -527,7 +586,7 @@ if submit:
                     if len(w) >= 4 and w not in STOPWORDS:
                         kws.append(w)
             kws = ", ".join(sorted(set(kws))[:10])
-            ss.auto_ideas = (
+            st.session_state.auto_ideas = (
                 f"**Format dominan:** {fmt_dom}\n\n"
                 f"**Kata kunci turunan:** {kws}\n\n"
                 "### 5 Ide Video (fallback lokal)\n"
@@ -538,47 +597,24 @@ if submit:
                 "5) **SIAPA**: Pemula editing • **APA**: Efek instan • **BAGAIMANA**: step-by-step • **Visual**: infografik 1-2-3\n"
             )
 
-# ---------------- CSS: kartu rapi & konsisten ----------------
+# ---------------- CSS ----------------
 st.markdown("""
 <style>
-/* Card grid: equal height */
-.card {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 14px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 420px;  /* bikin rata */
-}
-.card .thumbwrap { position: relative; border-radius: 10px; overflow:hidden; }
-.card img.thumb { width: 100%; display: block; }
-.badge { position:absolute; top:8px; left:8px; color:white; padding:2px 8px; font-size:12px; border-radius:6px; font-weight:700; }
+.badge { position:absolute; top:8px; left:8px; color:white; padding:2px 6px; font-size:12px;
+         border-radius:4px; font-weight:700; }
 .badge-live { background:#e53935; }
 .badge-short{ background:#1e88e5; }
-
-.title-area {
-  font-weight: 600;
-  line-height: 1.25;
-  font-size: 15px;
-  min-height: 60px;     /* area judul rata */
-  word-break: break-word;
-  white-space: normal;  /* jangan terpotong */
-}
-
-.meta-chips { margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
-.chip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; font-size:12px; color:white; }
+.thumbwrap { position:relative; }
+img.thumb { width:100%; border-radius:10px; display:block; }
+.linklike > button { background:none !important; border:none !important; padding:0 !important;
+                     color:#1f6feb; text-decoration:none; font-weight:600; cursor:pointer; }
+.linklike > button:hover { text-decoration:underline; }
+.chip { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; margin-right:6px; margin-bottom:6px; color:white; }
 .chip-views { background:#ff4b4b; }
 .chip-vph { background:#4b8bff; }
 .chip-time { background:#4caf50; }
 .chip-dur { background:#795548; }
-
-/* Buttons: full width & no wrap */
-.stButton > button { width: 100%; white-space: nowrap; }
-.linklike > button { background:none !important; border:none !important; padding:0 !important;
-                     color:#1f6feb; text-decoration:none; font-weight:600; cursor:pointer; }
-.linklike > button:hover { text-decoration:underline; }
+.dialog-actions > div > button { width:100%; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -588,7 +624,7 @@ HAS_DIALOG = hasattr(st, "dialog")
 if HAS_DIALOG:
     @st.dialog("📺 Video Preview")
     def video_preview_dialog():
-        v = ss.get("popup_video")
+        v = st.session_state.get("popup_video")
         if not v:
             st.write("Tidak ada video.")
             return
@@ -596,14 +632,17 @@ if HAS_DIALOG:
         yt_url = f"https://www.youtube.com/watch?v={vid}"
         ch_url = f"https://www.youtube.com/channel/{v.get('channelId','')}" if v.get("channelId") else None
 
+        # Header: title + chips
         st.markdown(f"### {v['title']}")
-        # chips header
-        ch = st.columns(4)
-        ch[0].markdown(f"<span class='chip chip-views'>👁 {format_views(v['views'])}</span>", unsafe_allow_html=True)
-        ch[1].markdown(f"<span class='chip chip-vph'>⚡ {v['vph']}</span>", unsafe_allow_html=True)
-        ch[2].markdown(f"<span class='chip chip-time'>⏱ {format_rel_time(v['publishedAt'])}</span>", unsafe_allow_html=True)
-        ch[3].markdown(f"<span class='chip chip-dur'>⏳ {v.get('duration','-')}</span>", unsafe_allow_html=True)
+        chips = (
+            f"<span class='chip chip-views'>👁 {format_views(v['views'])}</span>"
+            f"<span class='chip chip-vph'>⚡ {v['vph']}</span>"
+            f"<span class='chip chip-time'>⏱ {format_rel_time(v['publishedAt'])}</span>"
+            f"<span class='chip chip-dur'>⏳ {v.get('duration','-')}</span>"
+        )
+        st.markdown(chips, unsafe_allow_html=True)
 
+        # two columns: video + actions
         c1, c2 = st.columns([2,1])
         with c1:
             st.video(yt_url)
@@ -613,69 +652,51 @@ if HAS_DIALOG:
             if ch_url:
                 st.link_button("🌐 Kunjungi Channel", ch_url, use_container_width=True)
             st.text_input("Link Video", yt_url, key=f"copy_url_{vid}")
+            st.markdown("---")
             st.caption(f"Channel: {v['channel']}")
             if v.get("live") == "live":
-                st.success("🔴 LIVE content")
+                st.success("🔴 LIVE content terdeteksi")
             elif v.get("duration_sec",0) <= 60:
                 st.info("🟦 SHORT (≤60 detik)")
             else:
                 st.caption("📼 Video reguler")
 
-        # cache helpers
-        def cache_get(task): return ss.ai_cache.get(vid, {}).get(task)
-        def cache_set(task, text): ss.ai_cache.setdefault(vid, {})[task] = text
-        def cache_del(task):
-            if vid in ss.ai_cache and task in ss.ai_cache[vid]:
-                del ss.ai_cache[vid][task]
-
+        # Tabs inside dialog
         t1, t2, t3 = st.tabs(["ℹ️ Info", "✨ Asisten Konten AI", "📈 Analytics"])
-
         with t1:
             with st.expander("Deskripsi", expanded=False):
                 st.write(v.get("description","Tidak ada deskripsi."))
             st.caption(f"Publish: {format_jam_utc(v['publishedAt'])} • ID: {vid}")
 
+        def cache_get(task): return st.session_state.ai_cache.get(vid, {}).get(task)
+        def cache_set(task, text):
+            st.session_state.ai_cache.setdefault(vid, {})[task] = text
+
         with t2:
             a1, a2 = st.columns(2)
-
             with a1:
-                ccol = st.columns([1,1])
-                if ccol[0].button("🧾 Ringkas", key=f"d_summary_make_{vid}"):
+                if st.button("🧾 Ringkas Video Ini", key=f"d_summary_{vid}"):
                     cache_set("summary", ai_summary(v))
-                if ccol[1].button("Tutup", key=f"d_summary_close_{vid}"):
-                    cache_del("summary"); st.rerun()
                 if cache_get("summary"): st.markdown(cache_get("summary"))
 
-                ccol = st.columns([1,1])
-                if ccol[0].button("🔑 Tag SEO", key=f"d_tags_make_{vid}"):
+                if st.button("🔑 Buat Tag SEO", key=f"d_tags_{vid}"):
                     cache_set("tags", ai_seo_tags(v))
-                if ccol[1].button("Tutup", key=f"d_tags_close_{vid}"):
-                    cache_del("tags"); st.rerun()
                 if cache_get("tags"): st.text_area("Tag SEO", cache_get("tags"), height=120, key=f"d_tags_area_{vid}")
-
             with a2:
-                ccol = st.columns([1,1])
-                if ccol[0].button("📝 Kerangka Skrip", key=f"d_script_make_{vid}"):
+                if st.button("📝 Buat Kerangka Skrip", key=f"d_script_{vid}"):
                     cache_set("script", ai_script_outline(v))
-                if ccol[1].button("Tutup", key=f"d_script_close_{vid}"):
-                    cache_del("script"); st.rerun()
                 if cache_get("script"): st.markdown(cache_get("script"))
 
-                ccol = st.columns([1,1])
-                if ccol[0].button("✍️ Judul Alternatif", key=f"d_titles_make_{vid}"):
+                if st.button("✍️ Buat Judul Alternatif", key=f"d_titles_{vid}"):
                     cache_set("alt_titles", ai_alt_titles(v))
-                if ccol[1].button("Tutup", key=f"d_titles_close_{vid}"):
-                    cache_del("alt_titles"); st.rerun()
                 if cache_get("alt_titles"): st.markdown(cache_get("alt_titles"))
 
-                ccol = st.columns([1,1])
-                if ccol[0].button("🖼️ Ide Thumbnail", key=f"d_thumb_make_{vid}"):
+                if st.button("🖼️ Ide Thumbnail", key=f"d_thumb_{vid}"):
                     cache_set("thumbs", ai_thumb_ideas(v))
-                if ccol[1].button("Tutup", key=f"d_thumb_close_{vid}"):
-                    cache_del("thumbs"); st.rerun()
                 if cache_get("thumbs"): st.markdown(cache_get("thumbs"))
 
         with t3:
+            st.write("**Metrik Video**")
             colm = st.columns(4)
             colm[0].metric("Views", format_views(v["views"]))
             colm[1].metric("VPH", v["vph"])
@@ -684,55 +705,47 @@ if HAS_DIALOG:
 
         st.markdown("---")
         if st.button("❌ Tutup", key="close_dialog"):
-            ss.popup_video = None
+            st.session_state.popup_video = None
             st.rerun()
 
-# ---------------- Render results (cards) ----------------
-videos = ss.last_results
-if videos:
+# ---------------- Render results ----------------
+videos_to_show = st.session_state.last_results
+
+if videos_to_show:
     cols = st.columns(3)
     all_titles, rows_for_csv = [], []
-
-    for i, v in enumerate(videos):
+    for i, v in enumerate(videos_to_show):
         with cols[i % 3]:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-
-            # thumbnail + badge
+            # Thumbnail (display + badge)
             badge_html = ""
             if v.get("live") == "live": badge_html = '<div class="badge badge-live">LIVE</div>'
             elif v.get("duration_sec", 0) <= 60: badge_html = '<div class="badge badge-short">SHORT</div>'
             if v.get("thumbnail"):
-                st.markdown(f"<div class='thumbwrap'>{badge_html}<img class='thumb' src='{v['thumbnail']}'></div>", unsafe_allow_html=True)
+                st.markdown(f'<div class="thumbwrap">{badge_html}<img class="thumb" src="{v["thumbnail"]}"></div>',
+                            unsafe_allow_html=True)
 
-            # title area (clickable)
-            st.markdown('<div class="title-area">', unsafe_allow_html=True)
-            if st.button(v["title"], key=f"title_btn_{i}"):
-                ss.popup_video = v
-                if HAS_DIALOG:
-                    video_preview_dialog()
-            st.markdown('</div>', unsafe_allow_html=True)
+            # Buttons: Preview + Title (link-like)
+            pcol1, pcol2 = st.columns([1, 4])
+            with pcol1:
+                if st.button("🔍 Preview", key=f"preview_btn_{i}"):
+                    st.session_state.popup_video = v
+                    if HAS_DIALOG:
+                        video_preview_dialog()
+            with pcol2:
+                st.markdown('<div class="linklike">', unsafe_allow_html=True)
+                if st.button(v["title"], key=f"title_btn_{i}", help="Klik untuk preview"):
+                    st.session_state.popup_video = v
+                    if HAS_DIALOG:
+                        video_preview_dialog()
+                st.markdown('</div>', unsafe_allow_html=True)
 
-            # preview button
-            if st.button("🔍 Preview", key=f"preview_btn_{i}"):
-                ss.popup_video = v
-                if HAS_DIALOG:
-                    video_preview_dialog()
-
-            # channel
             st.caption(v["channel"])
-
-            # chips
-            st.markdown("<div class='meta-chips'>", unsafe_allow_html=True)
-            st.markdown(f"<span class='chip chip-views'>👁 {format_views(v['views'])}</span>", unsafe_allow_html=True)
-            st.markdown(f"<span class='chip chip-vph'>⚡ {v['vph']}</span>", unsafe_allow_html=True)
-            st.markdown(f"<span class='chip chip-time'>⏱ {format_rel_time(v['publishedAt'])}</span>", unsafe_allow_html=True)
-            st.markdown(f"<span class='chip chip-dur'>⏳ {v.get('duration','-')}</span>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            # bottom time row
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: st.markdown(f"<span class='chip chip-views'>👁 {format_views(v['views'])}</span>", unsafe_allow_html=True)
+            with c2: st.markdown(f"<span class='chip chip-vph'>⚡ {v['vph']}</span>", unsafe_allow_html=True)
+            with c3: st.markdown(f"<span class='chip chip-time'>⏱ {format_rel_time(v['publishedAt'])}</span>", unsafe_allow_html=True)
+            with c4: st.markdown(f"<span class='chip chip-dur'>⏳ {v.get('duration','-')}</span>", unsafe_allow_html=True)
             st.caption(f"📅 {format_jam_utc(v['publishedAt'])}")
-
-            st.markdown("</div>", unsafe_allow_html=True)  # end .card
 
         all_titles.append(v["title"])
         rows_for_csv.append({
@@ -741,9 +754,9 @@ if videos:
             "Durasi": v.get("duration","-"), "Link": f"https://www.youtube.com/watch?v={v['id']}"
         })
 
-    # Fallback inline detail kalau versi Streamlit belum ada dialog
-    if (not HAS_DIALOG) and ss.popup_video:
-        v = ss.popup_video
+    # -------- Fallback inline detail (jika Streamlit belum mendukung st.dialog) --------
+    if (not HAS_DIALOG) and st.session_state.popup_video:
+        v = st.session_state.popup_video
         vid = v["id"]
         st.markdown("---")
         st.subheader("📺 Video Detail")
@@ -752,110 +765,94 @@ if videos:
         st.caption(v["channel"])
         st.write(v.get("description", "Tidak ada deskripsi."))
 
-        def cache_get(task): return ss.ai_cache.get(vid, {}).get(task)
-        def cache_set(task, text): ss.ai_cache.setdefault(vid, {})[task] = text
-        def cache_del(task):
-            if vid in ss.ai_cache and task in ss.ai_cache[vid]:
-                del ss.ai_cache[vid][task]
-
         st.subheader("✨ Asisten Konten AI")
+        def cache_get(task): return st.session_state.ai_cache.get(vid, {}).get(task)
+        def cache_set(task, text): st.session_state.ai_cache.setdefault(vid, {})[task] = text
         c1, c2 = st.columns(2)
         with c1:
-            b = st.columns([1,1])
-            if b[0].button("🧾 Ringkas", key=f"btn_summary_make_{vid}"):
+            if st.button("🧾 Ringkas Video Ini", key=f"btn_summary_{vid}"):
                 cache_set("summary", ai_summary(v))
-            if b[1].button("Tutup", key=f"btn_summary_close_{vid}"):
-                cache_del("summary"); st.rerun()
             if cache_get("summary"): st.markdown(cache_get("summary"))
-
-            b = st.columns([1,1])
-            if b[0].button("🔑 Tag SEO", key=f"btn_tags_make_{vid}"):
+            if st.button("🔑 Buat Tag SEO", key=f"btn_tags_{vid}"):
                 cache_set("tags", ai_seo_tags(v))
-            if b[1].button("Tutup", key=f"btn_tags_close_{vid}"):
-                cache_del("tags"); st.rerun()
             if cache_get("tags"): st.text_area("Tag SEO", cache_get("tags"), height=120, key=f"tags_area_{vid}")
         with c2:
-            b = st.columns([1,1])
-            if b[0].button("📝 Kerangka Skrip", key=f"btn_script_make_{vid}"):
+            if st.button("📝 Buat Kerangka Skrip", key=f"btn_script_{vid}"):
                 cache_set("script", ai_script_outline(v))
-            if b[1].button("Tutup", key=f"btn_script_close_{vid}"):
-                cache_del("script"); st.rerun()
             if cache_get("script"): st.markdown(cache_get("script"))
-
-            b = st.columns([1,1])
-            if b[0].button("✍️ Judul Alternatif", key=f"btn_titles_make_{vid}"):
+            if st.button("✍️ Buat Judul Alternatif", key=f"btn_titles_{vid}"):
                 cache_set("alt_titles", ai_alt_titles(v))
-            if b[1].button("Tutup", key=f"btn_titles_close_{vid}"):
-                cache_del("alt_titles"); st.rerun()
             if cache_get("alt_titles"): st.markdown(cache_get("alt_titles"))
-
-            b = st.columns([1,1])
-            if b[0].button("🖼️ Ide Thumbnail", key=f"btn_thumb_make_{vid}"):
+            if st.button("🖼️ Buat Ide Thumbnail", key=f"btn_thumb_{vid}"):
                 cache_set("thumbs", ai_thumb_ideas(v))
-            if b[1].button("Tutup", key=f"btn_thumb_close_{vid}"):
-                cache_del("thumbs"); st.rerun()
             if cache_get("thumbs"): st.markdown(cache_get("thumbs"))
-
         if v.get("channelId"):
             st.markdown(f"[🌐 Kunjungi Channel YouTube](https://www.youtube.com/channel/{v['channelId']})")
-
         if st.button("❌ Tutup", key="close_popup"):
-            ss.popup_video = None
+            st.session_state.popup_video = None
             st.rerun()
 
-    # ---- Tab Ide: ringkasan + ide ----
+    # -------- Tab Ide: ringkasan niche + ide --------
     with tab2:
-        vids = ss.get("last_results", [])
-        kw = ss.get("keyword_input", "")
+        vids = st.session_state.get("last_results", [])
+        kw = st.session_state.get("keyword_input", "")
         if vids:
             st.markdown(render_niche_summary(vids, kw))
         else:
             st.info("Belum ada data. Silakan cari video dulu di tab 🔍.")
-        if ss.auto_ideas:
-            st.markdown(ss.auto_ideas)
+        if st.session_state.auto_ideas:
+            st.markdown(st.session_state.auto_ideas)
         else:
             st.caption("Tips: aktifkan Gemini untuk ide yang lebih variatif. Tanpa Gemini, gunakan ringkasan niche di atas sebagai acuan.")
 
-    # ---- Rekomendasi Judul ----
+    # -------- Rekomendasi Judul --------
     st.subheader("💡 Rekomendasi Judul (10 Judul, ≤100 Karakter)")
-    rec_titles = generate_titles_from_data(videos, ss.get("sort_option", "VPH Tertinggi"))
+    rec_titles = generate_titles_from_data(videos_to_show, st.session_state.get("sort_option", "VPH Tertinggi"))
     for idx, rt in enumerate(rec_titles, 1):
-        c1, c2, c3 = st.columns([6, 1, 1])
-        with c1: st.text_input(f"Judul {idx}", rt, key=f"judul_{idx}")
-        with c2: st.markdown(f"<span style='font-size:12px;color:gray'>{len(rt)}/100</span>", unsafe_allow_html=True)
-        with c3: st.button("📋", key=f"copy_judul_{idx}", on_click=lambda t=rt: ss.update({"copied": t}))
-    if "copied" in ss:
-        st.success(f"Judul tersalin: {ss['copied']}")
-        ss.pop("copied")
+        col1, col2, col3 = st.columns([6, 1, 1])
+        with col1: st.text_input(f"Judul {idx}", rt, key=f"judul_{idx}")
+        with col2: st.markdown(f"<span style='font-size:12px;color:gray'>{len(rt)}/100</span>", unsafe_allow_html=True)
+        with col3: st.button("📋", key=f"copy_judul_{idx}", on_click=lambda t=rt: st.session_state.update({"copied": t}))
+    if "copied" in st.session_state:
+        st.success(f"Judul tersalin: {st.session_state['copied']}")
+        st.session_state.pop("copied")
 
-    # ---- Rekomendasi Tag ----
+    # -------- Rekomendasi Tag --------
     st.subheader("🏷️ Rekomendasi Tag (max 500 karakter)")
-    uniq_words, seen = [], set()
-    for t in all_titles:
-        for w in re.split(r"[^\w]+", t.lower()):
-            if len(w) >= 3 and w not in STOPWORDS and w not in seen:
-                uniq_words.append(w); seen.add(w)
-    tag_string = ", ".join(uniq_words)
-    if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
-    st.text_area("Tag (gabungan hasil pencarian)", tag_string, height=100, key="tag_area_global")
-
-    c1, c2 = st.columns([8, 1])
-    with c2:
+    if st.session_state.popup_video and not HAS_DIALOG:
+        vprev = st.session_state.popup_video
+        preview_tags = ai_seo_tags(vprev)
+        st.text_area("Tag (berdasarkan video yang dipreview)", preview_tags[:500], height=120, key=f"tag_area_preview_{vprev['id']}")
+    else:
+        uniq_words, seen = [], set()
+        for t in all_titles:
+            for w in re.split(r"[^\w]+", t.lower()):
+                if len(w) >= 3 and w not in STOPWORDS and w not in seen:
+                    uniq_words.append(w); seen.add(w)
+        tag_string = ", ".join(uniq_words)
+        if len(tag_string) > 500: tag_string = tag_string[:497] + "..."
+        st.text_area("Tag (gabungan hasil pencarian)", tag_string, height=100, key="tag_area_global")
+    col1, col2 = st.columns([8, 1])
+    with col2:
         def _copy_current_tags():
-            ss["copied_tag"] = ss.get("tag_area_global", "")
+            if st.session_state.popup_video and not HAS_DIALOG:
+                vprev = st.session_state.popup_video
+                st.session_state["copied_tag"] = st.session_state.get(f"tag_area_preview_{vprev['id']}", "")
+            else:
+                st.session_state["copied_tag"] = st.session_state.get("tag_area_global", "")
         st.button("📋", key="copy_tag_btn", on_click=_copy_current_tags)
-    if "copied_tag" in ss:
+    if "copied_tag" in st.session_state:
         st.success("✅ Tag tersalin!")
-        ss.pop("copied_tag")
+        st.session_state.pop("copied_tag")
 
-    # ---- Downloads ----
+    # -------- Downloads --------
     st.subheader("⬇️ Download Data")
     df = pd.DataFrame(rows_for_csv)
     csv_video_bytes = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV (Video)", csv_video_bytes, "youtube_riset.csv", "text/csv", key="dl_csv")
 
-    if ss.auto_ideas:
-        ideas_txt_bytes = ss.auto_ideas.encode("utf-8")
+    if st.session_state.auto_ideas:
+        ideas_txt_bytes = st.session_state.auto_ideas.encode("utf-8")
         st.download_button("Download Ide (TXT)", ideas_txt_bytes, "auto_ideas.txt", "text/plain", key="dl_txt")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -863,4 +860,4 @@ if videos:
             zf.writestr("auto_ideas.txt", ideas_txt_bytes)
         st.download_button("Download Paket (ZIP)", zip_buffer.getvalue(), "paket_riset.zip", "application/zip", key="dl_zip")
 else:
-    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik judul atau tombol **🔍 Preview** untuk membuka popup.")
+    st.info("Mulai dengan melakukan pencarian di tab 🔍, lalu klik **🔍 Preview** atau **judul** untuk membuka popup.")
