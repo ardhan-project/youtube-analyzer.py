@@ -46,27 +46,11 @@ with tab1:
         submit = st.form_submit_button("🔍 Cari Video")
 
 with tab2:
-    st.subheader("💡 Rekomendasi Ide Video dari Gemini AI")
-    g_keyword = st.text_input("Masukkan Kata Kunci (untuk ide)", placeholder="contoh: bamboo flute meditation", key="g_kw")
-    if st.button("Dapatkan Ide Video"):
-        if not st.session_state.gemini_api:
-            st.error("⚠️ Masukkan Gemini API Key di sidebar dulu.")
-        else:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=st.session_state.gemini_api)
-                model = genai.GenerativeModel("gemini-1.5-flash")
-                prompt = f"""
-Buatkan 5 ide konten video YouTube berbasis kata kunci: "{g_keyword}".
-Format markdown bernomor. Sertakan untuk tiap ide:
-- Judul ide
-- Konsep konten (2-3 kalimat)
-- Target audiens: usia, lokasi, minat
-"""
-                resp = model.generate_content(prompt)
-                st.markdown(resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini.")
-            except Exception as e:
-                st.error(f"❌ Error Gemini: {e}")
+    st.subheader("💡 Rekomendasi Ide Video (otomatis dari hasil pencarian)")
+    if "auto_ideas" in st.session_state:
+        st.markdown(st.session_state["auto_ideas"])
+    else:
+        st.info("⚠️ Belum ada ide. Silakan cari video dulu di tab 🔍.")
 
 # ================== Utils ==================
 def iso8601_to_seconds(duration: str) -> int:
@@ -214,6 +198,56 @@ if submit:
 
     videos_all = filter_by_video_type(videos_all, video_type)
     videos_all = apply_client_sort(videos_all, sort_option)
+    st.session_state["last_results"] = videos_all
+
+    # ====== Generate ide otomatis dengan Gemini ======
+    if videos_all and st.session_state.gemini_api:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=st.session_state.gemini_api)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            top_titles = [v["title"] for v in videos_all[:5]]
+            titles_text = "\n".join([f"- {t}" for t in top_titles])
+            keywords = []
+            for t in top_titles:
+                for w in re.split(r"[^\w]+", t.lower()):
+                    if len(w) >= 4 and w not in STOPWORDS:
+                        keywords.append(w)
+            derived_kw = ", ".join(sorted(set(keywords))[:10])
+            prompt = f"""
+Berdasarkan hasil pencarian video YouTube berikut:
+
+{titles_text}
+
+Kata kunci turunan: {derived_kw}
+
+Buatkan 5 ide konten video baru yang relevan.
+Untuk setiap ide gunakan format:
+
+📌 STRATEGI KONTEN
+
+🧠 SIAPA:
+- Usia: …
+- Gender: …
+- Lokasi: …
+- Status: …
+- Masalah: …
+- Harapan: …
+
+📚 APA:
+- Kebutuhan / Minat: …
+- Jenis Konten yang Dicari: …
+
+🎯 BAGAIMANA:
+- Gaya Penyampaian: …
+- Bentuk Konten: …
+- Durasi: …
+- Frekuensi: …
+"""
+            resp = model.generate_content(prompt)
+            st.session_state["auto_ideas"] = resp.text if hasattr(resp, "text") else "Tidak ada respons dari Gemini."
+        except Exception as e:
+            st.session_state["auto_ideas"] = f"❌ Error Gemini: {e}"
 
     if not videos_all:
         st.error("❌ Tidak ada video ditemukan")
@@ -222,7 +256,6 @@ if submit:
         all_titles, rows_for_csv = [], []
         for i, v in enumerate(videos_all):
             with cols[i % 3]:
-                # Thumbnail + Badge
                 badge = ""
                 if v["live"] == "live":
                     badge = "<div style='position:absolute;top:6px;left:6px;background:#e53935;color:white;padding:2px 6px;font-size:12px;border-radius:4px;font-weight:600;'>LIVE</div>"
@@ -230,18 +263,13 @@ if submit:
                     badge = "<div style='position:absolute;top:6px;left:6px;background:#1e88e5;color:white;padding:2px 6px;font-size:12px;border-radius:4px;font-weight:600;'>SHORT</div>"
                 if v["thumbnail"]:
                     st.markdown(f"<div style='position:relative;display:inline-block;width:100%;'>{badge}<img src='{v['thumbnail']}' style='width:100%;border-radius:10px;display:block;'></div>", unsafe_allow_html=True)
-
                 st.markdown(f"**[{v['title']}]({'https://www.youtube.com/watch?v='+v['id']})**")
                 st.caption(v["channel"])
                 c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>👁 {format_views(v['views'])} views</div>", unsafe_allow_html=True)
-                with c2:
-                    st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⚡ {v['vph']} VPH</div>", unsafe_allow_html=True)
-                with c3:
-                    st.markdown(f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⏱ {format_rel_time(v['publishedAt'])}</div>", unsafe_allow_html=True)
+                with c1: st.markdown(f"<div style='font-size:13px;background:#ff4b4b;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>👁 {format_views(v['views'])} views</div>", unsafe_allow_html=True)
+                with c2: st.markdown(f"<div style='font-size:13px;background:#4b8bff;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⚡ {v['vph']} VPH</div>", unsafe_allow_html=True)
+                with c3: st.markdown(f"<div style='font-size:13px;background:#4caf50;color:white;padding:3px 8px;border-radius:8px;display:inline-block;'>⏱ {format_rel_time(v['publishedAt'])}</div>", unsafe_allow_html=True)
                 st.caption(f"📅 {format_jam_utc(v['publishedAt'])} • ⏳ {v.get('duration','-')}")
-
             all_titles.append(v["title"])
             rows_for_csv.append({
                 "Judul": v["title"], "Channel": v["channel"], "Views": v["views"],
